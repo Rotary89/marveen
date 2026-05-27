@@ -116,8 +116,10 @@ export function isManagedSettingsReady(): boolean {
   if (!existsSync(MANAGED_SETTINGS_PATH)) return false
   try {
     const data = JSON.parse(readFileSync(MANAGED_SETTINGS_PATH, 'utf-8')) as {
+      channelsEnabled?: boolean
       allowedChannelPlugins?: Array<{ plugin: string; marketplace: string }>
     }
+    if (!data.channelsEnabled) return false
     const plugins = data.allowedChannelPlugins ?? []
     return plugins.some(
       p => p.plugin === SLACK_ALLOWLIST_ENTRY.plugin && p.marketplace === SLACK_ALLOWLIST_ENTRY.marketplace
@@ -130,24 +132,23 @@ export function isManagedSettingsReady(): boolean {
 export function getManagedSettingsSudoCommand(): string {
   const mergeScript = [
     'import json, sys',
-    'new_plugins = json.loads(sys.stdin.read())["allowedChannelPlugins"]',
-    'try:',
-    `  with open("${MANAGED_SETTINGS_PATH}") as f: data = json.load(f)`,
-    'except: data = {}',
+    'new_data = json.loads(sys.stdin.read())',
+    'try:\n  with open("' + MANAGED_SETTINGS_PATH + '") as f: data = json.load(f)',
+    'except:\n  data = {}',
+    'data["channelsEnabled"] = True',
     'existing = data.get("allowedChannelPlugins", [])',
-    'for e in new_plugins:',
-    '  if not any(p.get("plugin")==e["plugin"] and p.get("marketplace")==e["marketplace"] for p in existing):',
-    '    existing.append(e)',
+    'for e in new_data["allowedChannelPlugins"]:\n  if not any(p.get("plugin")==e["plugin"] and p.get("marketplace")==e["marketplace"] for p in existing):\n    existing.append(e)',
     'data["allowedChannelPlugins"] = existing',
     'print(json.dumps(data, indent=2))',
-  ].join('; ')
+  ].join('\n')
   const payload = JSON.stringify({
     allowedChannelPlugins: [
       SLACK_ALLOWLIST_ENTRY,
       { plugin: 'telegram', marketplace: 'claude-plugins-official' },
     ],
   })
-  return `echo '${payload}' | sudo python3 -c '${mergeScript}' | sudo tee "${MANAGED_SETTINGS_PATH}" > /dev/null`
+  const escapedScript = mergeScript.replace(/'/g, "'\\''")
+  return `echo '${payload}' | sudo python3 -c '${escapedScript}' | sudo tee "${MANAGED_SETTINGS_PATH}" > /dev/null`
 }
 
 export function setAgentEnabledPlugins(name: string, provider: ChannelProviderType): void {

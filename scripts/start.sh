@@ -22,4 +22,4 @@ elif [ "$OS" = "Linux" ]; then
 fi
 
 echo "✓ Dashboard: http://localhost:3420"
-echo "✓ Telegram csatorna inditva"
+echo "✓ Csatorna inditva"
