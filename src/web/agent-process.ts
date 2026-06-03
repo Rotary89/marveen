@@ -17,7 +17,7 @@ import { CHANNEL_PROVIDER } from '../config.js'
 import { loadProfileTemplate } from './profiles.js'
 import { writeAgentSettingsFromProfile } from './agent-scaffold.js'
 import { getSecret } from './vault.js'
-import { reapChannelOrphans } from './channel-poller-reap.js'
+import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller-reap.js'
 
 const TMUX = resolveFromPath('tmux')
 const CLAUDE = resolveFromPath('claude')
@@ -104,6 +104,18 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
       reapChannelOrphans(agentProvider, dir)
     } catch (err) {
       logger.warn({ err, name }, 'pre-launch channel-poller reap failed (continuing)')
+    }
+
+    // Also reap DETACHED channel claudes (the parent-process leak): a prior
+    // --continue session that survived kill-session keeps a poller 409-racing
+    // this agent's bot token, which the health monitor reads as "down" and
+    // restarts -- a self-feeding thrash loop (zara, 2026-06-03). We just killed
+    // this agent's tmux session above, so its leftover claude is now detached;
+    // pane attribution spares every live sibling and the main session.
+    try {
+      reapDetachedChannelClaudes({ tmuxPath: TMUX })
+    } catch (err) {
+      logger.warn({ err, name }, 'pre-launch detached-claude reap failed (continuing)')
     }
 
     const model = readAgentModel(name)

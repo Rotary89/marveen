@@ -16,7 +16,7 @@ import {
   stopAgentProcess,
   scheduleIdentitySetup,
 } from './agent-process.js'
-import { reapChannelOrphans } from './channel-poller-reap.js'
+import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller-reap.js'
 import { probeTelegramConflict } from './channel-conflict-probe.js'
 import { schedulePluginUnlockAfterRespawn } from './channel-plugin-unlock.js'
 import { detectPaneState, decidePaneErrorAlert, type PaneErrorAlertState, type PaneState } from '../pane-state.js'
@@ -181,6 +181,20 @@ function resumeMarveenSession(): boolean {
       reapChannelOrphans(provider.type, PROJECT_ROOT)
     } catch (err) {
       logger.warn({ err }, 'resumeMarveenSession: pre-respawn reap failed (continuing)')
+    }
+
+    // Also reap DETACHED main-session claudes. reapChannelOrphans (env-scan)
+    // cannot see the main session: channels.sh launches it without a
+    // *_STATE_DIR export, so neither the claude nor its bun poller match the
+    // env needle, and bot.pid is never written. A --continue respawn that did
+    // not tear down the prior claude leaves it detached (reparented to the tmux
+    // server) with a live poller hammering the shared token. Pane attribution
+    // spares the live session (this pane) and kills only the leftovers.
+    // See project_channels_continue_respawn_leak.
+    try {
+      reapDetachedChannelClaudes({ tmuxPath: TMUX })
+    } catch (err) {
+      logger.warn({ err }, 'resumeMarveenSession: detached-claude reap failed (continuing)')
     }
 
     const claudeCmd = buildMainSessionRespawnCmd({

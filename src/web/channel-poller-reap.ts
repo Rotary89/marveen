@@ -130,3 +130,157 @@ export function reapChannelOrphans(
   }
   return { reaped: all, source: { fromBotPid, fromEnvScan } }
 }
+
+// ---------------------------------------------------------------------------
+// Detached channel CLAUDE reaper (the parent-process leak, 2026-06-03).
+//
+// reapChannelOrphans (above) kills bun/node POLLERS by env-var scan + bot.pid.
+// That works for sub-agents (their claude+poller carry TELEGRAM_STATE_DIR=<dir>)
+// but MISSES the main channels session entirely: channels.sh launches the main
+// `claude --channels` with NO *_STATE_DIR export (the plugin uses its default
+// dir), so neither the main claude nor its poller match the env needle, and the
+// plugin never writes bot.pid. When a --continue respawn (channel-monitor
+// respawn-pane / agent-process start) fails to tear down the prior claude, the
+// detached claude survives -- reparented to the tmux server -- and keeps a bun
+// poller hitting getUpdates on the SHARED bot token. 5 such orphans accumulated
+// over 13 days, each 409-racing the live poller (token churn + a self-feeding
+// agent thrash-restart loop). See project_channels_continue_respawn_leak.
+//
+// Identification is by tmux-pane attribution, NOT env/argv heuristics (cmdline
+// alone cannot tell a live agent claude from a detached one -- see
+// feedback_verify_session_before_kill): a `claude --channels` process is an
+// orphan iff neither its pid nor any ancestor pid is a LIVE tmux pane pid.
+//   - main session: tmux runs claude as the pane leader, so claudePid == panePid.
+//   - sub-agents:   tmux runs `sh -c "...claude..."`, so the pane pid is the sh
+//                   and claude is its child -> ancestor walk catches it.
+// The tmux SERVER process is excluded up front: its argv embeds the full
+// `new-session ... claude --channels ...` string, a false positive, but argv[0]
+// is tmux, not claude.
+
+export interface ProcRow { pid: number; ppid: number; command: string }
+
+// argv[0] basename === 'claude' (the binary), so the tmux server row whose argv
+// merely *contains* the claude command string is excluded.
+function isClaudeBinary(command: string): boolean {
+  const argv0 = command.trim().split(/\s+/, 1)[0] ?? ''
+  const base = argv0.split('/').pop() ?? ''
+  return base === 'claude'
+}
+
+/**
+ * Pure: return the pids of `claude --channels` processes that are NOT attached
+ * to any live tmux pane (orphans). `livePanePids` is the set of pane pids from
+ * `tmux list-panes -a`. `channelNeedle` optionally restricts to one plugin
+ * (e.g. 'plugin:telegram@...'); when omitted, every channel plugin is in scope.
+ * Exported for testability.
+ */
+export function findOrphanChannelClaudes(
+  procs: ProcRow[],
+  livePanePids: Set<number>,
+  channelNeedle?: string,
+): number[] {
+  const byPid = new Map<number, ProcRow>()
+  for (const p of procs) byPid.set(p.pid, p)
+
+  const attachedToLivePane = (pid: number): boolean => {
+    let cur = pid
+    const seen = new Set<number>()
+    for (let hops = 0; hops < 8; hops++) {
+      if (livePanePids.has(cur)) return true
+      if (seen.has(cur)) break
+      seen.add(cur)
+      const next = byPid.get(cur)?.ppid
+      if (next === undefined || next === cur || next <= 1) break
+      cur = next
+    }
+    return false
+  }
+
+  const orphans: number[] = []
+  for (const p of procs) {
+    if (!p.command.includes('--channels')) continue
+    if (!isClaudeBinary(p.command)) continue
+    if (channelNeedle && !p.command.includes(channelNeedle)) continue
+    if (attachedToLivePane(p.pid)) continue
+    orphans.push(p.pid)
+  }
+  return orphans
+}
+
+function snapshotProcs(): ProcRow[] {
+  try {
+    const out = execSync('/bin/ps -axww -o pid=,ppid=,command=', { timeout: 5000, encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 })
+    const rows: ProcRow[] = []
+    for (const line of out.split('\n')) {
+      const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/)
+      if (!m) continue
+      rows.push({ pid: parseInt(m[1]!, 10), ppid: parseInt(m[2]!, 10), command: m[3]! })
+    }
+    return rows
+  } catch (err) {
+    logger.warn({ err }, 'channel-poller-reap: ps -axww snapshot failed')
+    return []
+  }
+}
+
+function livePanePids(tmuxPath: string): Set<number> {
+  try {
+    const out = execSync(`${tmuxPath} list-panes -a -F '#{pane_pid}'`, { timeout: 5000, encoding: 'utf-8' })
+    const s = new Set<number>()
+    for (const line of out.split('\n')) {
+      const n = parseInt(line.trim(), 10)
+      if (Number.isFinite(n) && n > 1) s.add(n)
+    }
+    return s
+  } catch (err) {
+    logger.warn({ err }, 'channel-poller-reap: tmux list-panes failed')
+    return new Set()
+  }
+}
+
+function killBunChildren(claudePid: number): void {
+  try {
+    const out = execSync(`/usr/bin/pgrep -P ${claudePid} bun`, { timeout: 3000, encoding: 'utf-8' })
+    for (const line of out.split('\n')) {
+      const pid = parseInt(line.trim(), 10)
+      if (Number.isFinite(pid) && pid > 1) {
+        try { process.kill(pid, 'SIGTERM') } catch { /* gone */ }
+      }
+    }
+  } catch { /* no bun children (pgrep exits 1) */ }
+}
+
+/**
+ * Reap detached `claude --channels` orphans (parent-process leak). SAFE to call
+ * before any (re)spawn: it spares every claude attached to a live tmux pane, so
+ * it never kills the active session or a live sibling agent -- only truly
+ * detached leftovers. Kills each orphan's bun poller children first, then the
+ * claude (SIGTERM, ~300ms grace, SIGKILL stragglers). Returns reaped pids.
+ *
+ * tmuxPath defaults to a bare `tmux` (resolved on PATH); callers that already
+ * hold an absolute path should pass it.
+ */
+export function reapDetachedChannelClaudes(opts: { channelNeedle?: string; tmuxPath?: string } = {}): number[] {
+  const tmuxPath = opts.tmuxPath ?? 'tmux'
+  const procs = snapshotProcs()
+  const live = livePanePids(tmuxPath)
+  // No live panes resolved (tmux query failed) -> refuse to reap: without the
+  // live set we cannot tell orphans from the active session. Fail safe.
+  if (live.size === 0) {
+    logger.warn('channel-poller-reap: no live panes resolved, skipping detached-claude reap (fail-safe)')
+    return []
+  }
+  const orphans = findOrphanChannelClaudes(procs, live, opts.channelNeedle)
+  for (const pid of orphans) {
+    killBunChildren(pid)
+    try { process.kill(pid, 'SIGTERM') } catch { /* gone */ }
+  }
+  if (orphans.length > 0) {
+    try { execFileSync('/bin/sleep', ['0.3'], { timeout: 2000 }) } catch { /* ignore */ }
+    for (const pid of orphans) {
+      try { process.kill(pid, 0); process.kill(pid, 'SIGKILL') } catch { /* gone */ }
+    }
+    logger.info({ reaped: orphans, channelNeedle: opts.channelNeedle ?? '(all)' }, 'channel-poller-reap: detached channel claudes killed')
+  }
+  return orphans
+}

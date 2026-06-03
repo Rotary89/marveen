@@ -40,7 +40,15 @@ describe('channel-monitor: stage-3 resumeMarveenSession recovery hardening', () 
     // Cheap guard: a future refactor that drops the symbol from the
     // import list would leave the function as a TS reference error,
     // but this assertion surfaces it explicitly with a clearer message.
-    expect(src).toMatch(/import\s*{\s*reapChannelOrphans\s*}\s*from\s*'\.\/channel-poller-reap\.js'/)
+    expect(src).toMatch(/import\s*{[^}]*\breapChannelOrphans\b[^}]*}\s*from\s*'\.\/channel-poller-reap\.js'/)
+  })
+
+  it('reapDetachedChannelClaudes is imported and called BEFORE respawn (parent-claude leak fix)', () => {
+    expect(src).toMatch(/import\s*{[^}]*\breapDetachedChannelClaudes\b[^}]*}\s*from\s*'\.\/channel-poller-reap\.js'/)
+    const reapIdx = fnBody.indexOf('reapDetachedChannelClaudes(')
+    const respawnIdx = fnBody.indexOf("'respawn-pane'")
+    expect(reapIdx, 'reapDetachedChannelClaudes call missing from resumeMarveenSession').toBeGreaterThan(0)
+    expect(reapIdx).toBeLessThan(respawnIdx)
   })
 
   it('dismissResumeSummaryModalIfPresent is imported from agent-process', () => {
