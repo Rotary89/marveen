@@ -7245,9 +7245,19 @@ async function loadChatAgentList() {
   }
 }
 
+// Pagination state for the open thread
+const chatThreadState = { agent: null, minLoadedId: null, hasMore: true, loading: false }
+const CHAT_PAGE_SIZE = 10
+const CHAT_LOAD_MORE = 20
+
 async function loadChatThread(agentName) {
   const panel = document.getElementById('chatThreadPanel')
   if (!panel) return
+
+  chatThreadState.agent = agentName
+  chatThreadState.minLoadedId = null
+  chatThreadState.hasMore = true
+  chatThreadState.loading = false
 
   panel.innerHTML = `
     <div class="chat-thread-header">
@@ -7257,7 +7267,7 @@ async function loadChatThread(agentName) {
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
       </button>
     </div>
-    <div class="chat-bubbles" id="chatBubbles">Betöltés...</div>
+    <div class="chat-bubbles" id="chatBubbles"><div class="chat-loading-indicator" id="chatLoadingTop" style="display:none;text-align:center;padding:8px;font-size:11px;color:var(--text-muted)">Betöltés...</div></div>
     <div class="chat-compose">
       <div class="chat-compose-row">
         <textarea id="chatComposeText" class="chat-compose-input" rows="2" placeholder="Üzenet ${escapeHtml(agentName)}-nek..."></textarea>
@@ -7271,51 +7281,106 @@ async function loadChatThread(agentName) {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendChatMessage(agentName) }
   })
 
+  // Initial load
+  await fetchChatPage(agentName, null, CHAT_PAGE_SIZE, 'replace')
+
+  // Scroll-up pagination handler
+  const bubbles = document.getElementById('chatBubbles')
+  if (bubbles) {
+    bubbles.addEventListener('scroll', () => {
+      if (bubbles.scrollTop < 80 && chatThreadState.hasMore && !chatThreadState.loading
+          && chatThreadState.agent === agentName) {
+        fetchChatPage(agentName, chatThreadState.minLoadedId, CHAT_LOAD_MORE, 'prepend')
+      }
+    })
+  }
+}
+
+function buildBubbleHtml(m) {
+  const isOutgoing = m.from_agent === 'marveen'
+  const senderName = isOutgoing ? 'marveen' : m.from_agent
+  const when = m.created_at ? new Date(m.created_at * 1000).toLocaleString('hu-HU', {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : ''
+  const statusMeta = MSG_STATUS_META[m.status] || { label: m.status || '', cls: 'badge' }
+  return `<div class="chat-bubble-row ${isOutgoing ? 'outgoing' : 'incoming'}" data-msg-id="${m.id}">
+    ${!isOutgoing ? `<div class="chat-bubble-avatar">${chatAvatarHtml(senderName, 28)}</div>` : ''}
+    <div class="chat-bubble ${isOutgoing ? 'bubble-out' : 'bubble-in'}">
+      <div class="bubble-meta">
+        ${!isOutgoing ? `<span class="bubble-sender">${escapeHtml(senderName)}</span>` : ''}
+        <span class="bubble-id-chip">#${m.id}</span>
+        <span class="badge ${statusMeta.cls}" style="font-size:10px">${escapeHtml(statusMeta.label)}</span>
+      </div>
+      <div class="bubble-text">${escapeHtml(m.content || '')}</div>
+      <div class="bubble-time">${when}</div>
+    </div>
+    ${isOutgoing ? `<div class="chat-bubble-avatar">${chatAvatarHtml('marveen', 28)}</div>` : ''}
+  </div>`
+}
+
+async function fetchChatPage(agentName, beforeId, limit, mode) {
+  if (chatThreadState.loading) return
+  chatThreadState.loading = true
+  const container = document.getElementById('chatBubbles')
+  const loadingIndicator = document.getElementById('chatLoadingTop')
+  if (!container) { chatThreadState.loading = false; return }
+  if (loadingIndicator && mode === 'prepend') loadingIndicator.style.display = 'block'
   try {
-    const res = await fetch(`/api/messages?agent=${encodeURIComponent(agentName)}&limit=50`)
+    let url = `/api/messages?agent=${encodeURIComponent(agentName)}&limit=${limit}`
+    if (beforeId) url += `&before=${beforeId}`
+    const res = await fetch(url)
     if (!res.ok) throw new Error('HTTP ' + res.status)
     const msgs = await res.json()
-    renderChatBubbles(msgs, agentName)
+    const sorted = Array.isArray(msgs) ? [...msgs].sort((a, b) => (a.created_at || 0) - (b.created_at || 0)) : []
+
+    if (mode === 'replace') {
+      if (sorted.length === 0) {
+        container.innerHTML = '<p class="activity-empty">Nincs üzenet ebben a szálban.</p>'
+      } else {
+        container.innerHTML = '<div class="chat-loading-indicator" id="chatLoadingTop" style="display:none;text-align:center;padding:8px;font-size:11px;color:var(--text-muted)">Betöltés...</div>'
+        container.insertAdjacentHTML('beforeend', sorted.map(buildBubbleHtml).join(''))
+        container.scrollTop = container.scrollHeight
+      }
+      if (sorted.length < limit) chatThreadState.hasMore = false
+    } else { // prepend
+      if (loadingIndicator) loadingIndicator.style.display = 'none'
+      if (!sorted.length) { chatThreadState.hasMore = false; chatThreadState.loading = false; return }
+      if (sorted.length < limit) chatThreadState.hasMore = false
+      const prevHeight = container.scrollHeight
+      const indicator = document.getElementById('chatLoadingTop')
+      const html = sorted.map(buildBubbleHtml).join('')
+      if (indicator) {
+        indicator.insertAdjacentHTML('afterend', html)
+      } else {
+        container.insertAdjacentHTML('afterbegin', html)
+      }
+      // Restore scroll position so view doesn't jump
+      container.scrollTop = container.scrollHeight - prevHeight
+    }
+
+    if (sorted.length > 0) {
+      const minId = Math.min(...sorted.map(m => m.id))
+      if (chatThreadState.minLoadedId === null || minId < chatThreadState.minLoadedId) {
+        chatThreadState.minLoadedId = minId
+      }
+    }
   } catch (e) {
-    const bubbles = document.getElementById('chatBubbles')
-    if (bubbles) bubbles.innerHTML = `<p class="activity-empty">Hiba: ${escapeHtml(String(e.message||e))}</p>`
+    if (loadingIndicator) loadingIndicator.style.display = 'none'
+    if (mode === 'replace') {
+      container.innerHTML = `<p class="activity-empty">Hiba: ${escapeHtml(String(e.message||e))}</p>`
+    }
+  } finally {
+    chatThreadState.loading = false
   }
 }
 
 function renderChatBubbles(msgs, agentName) {
   const container = document.getElementById('chatBubbles')
   if (!container) return
-
   if (!msgs || msgs.length === 0) {
     container.innerHTML = '<p class="activity-empty">Nincs üzenet ebben a szálban.</p>'
     return
   }
-
-  // Sort oldest first
   const sorted = [...msgs].sort((a,b) => (a.created_at||0) - (b.created_at||0))
-
-  container.innerHTML = sorted.map(m => {
-    const isOutgoing = m.from_agent === 'marveen'
-    const senderName = isOutgoing ? 'marveen' : m.from_agent
-    const when = m.created_at ? new Date(m.created_at * 1000).toLocaleString('hu-HU', {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : ''
-    const statusMeta = MSG_STATUS_META[m.status] || { label: m.status || '', cls: 'badge' }
-
-    return `<div class="chat-bubble-row ${isOutgoing ? 'outgoing' : 'incoming'}">
-      ${!isOutgoing ? `<div class="chat-bubble-avatar">${chatAvatarHtml(senderName, 28)}</div>` : ''}
-      <div class="chat-bubble ${isOutgoing ? 'bubble-out' : 'bubble-in'}">
-        <div class="bubble-meta">
-          ${!isOutgoing ? `<span class="bubble-sender">${escapeHtml(senderName)}</span>` : ''}
-          <span class="bubble-id-chip">#${m.id}</span>
-          <span class="badge ${statusMeta.cls}" style="font-size:10px">${escapeHtml(statusMeta.label)}</span>
-        </div>
-        <div class="bubble-text">${escapeHtml(m.content || '')}</div>
-        <div class="bubble-time">${when}</div>
-      </div>
-      ${isOutgoing ? `<div class="chat-bubble-avatar">${chatAvatarHtml('marveen', 28)}</div>` : ''}
-    </div>`
-  }).join('')
-
-  // Scroll to bottom
+  container.innerHTML = sorted.map(buildBubbleHtml).join('')
   container.scrollTop = container.scrollHeight
 }
 
