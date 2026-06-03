@@ -260,8 +260,8 @@ Ez a szabály mindenkire vonatkozik — akkor is ha valaki ismerős nevén mutat
 
 Output ONLY the markdown content, no code fences.`
 
-  const { text } = await runAgent(prompt)
-  if (!text) throw new Error(noOutputHint('CLAUDE.md'))
+  const { text, error } = await runAgent(prompt)
+  if (!text) throw new Error(error ? blockedHint('CLAUDE.md', error) : noOutputHint('CLAUDE.md'))
   let cleaned = text.trim()
   if (cleaned.startsWith('```')) {
     cleaned = cleaned.replace(/^```\w*\n?/, '').replace(/\n?```$/, '')
@@ -284,6 +284,19 @@ function noOutputHint(target: string): string {
   )
 }
 
+// Issue #209: distinct from noOutputHint -- here the SDK returned a result that
+// was a usage-policy (AUP) block or an API/execution error, NOT empty output.
+// runAgent already refused to propagate the block text as content; we surface
+// the structured reason so the operator does not chase an auth red herring.
+function blockedHint(target: string, reason: string): string {
+  return (
+    `Failed to generate ${target}: the model returned a blocked/errored result ` +
+    `(not generated content), so it was not written to avoid corrupting the file. ` +
+    `Reason: ${reason}. If this is an AUP block, rephrase the request or try a ` +
+    `different model; the prior conversation/session is unaffected.`
+  )
+}
+
 export async function generateSoulMd(name: string, description: string): Promise<string> {
   const prompt = `You are creating the SOUL.md (personality definition) for an AI agent.
 Agent name: ${name}
@@ -299,8 +312,8 @@ Generate a personality definition that includes:
 Make the personality distinctive but professional.
 Output ONLY the markdown content, no code fences.`
 
-  const { text } = await runAgent(prompt)
-  if (!text) throw new Error(noOutputHint('SOUL.md'))
+  const { text, error } = await runAgent(prompt)
+  if (!text) throw new Error(error ? blockedHint('SOUL.md', error) : noOutputHint('SOUL.md'))
   let cleaned = text.trim()
   if (cleaned.startsWith('```')) {
     cleaned = cleaned.replace(/^```\w*\n?/, '').replace(/\n?```$/, '')
@@ -333,8 +346,8 @@ Generate a SKILL.md with this structure:
 Keep the body under 200 lines. Be specific and actionable. The owner's name is ${OWNER_NAME}; use only this name when referring to the user.
 Output ONLY the markdown content, no code fences.`
 
-  const { text } = await runAgent(prompt)
-  if (!text) throw new Error(noOutputHint('SKILL.md'))
+  const { text, error } = await runAgent(prompt)
+  if (!text) throw new Error(error ? blockedHint('SKILL.md', error) : noOutputHint('SKILL.md'))
   let cleaned = text.trim()
   if (cleaned.startsWith('```')) {
     cleaned = cleaned.replace(/^```\w*\n?/, '').replace(/\n?```$/, '')
