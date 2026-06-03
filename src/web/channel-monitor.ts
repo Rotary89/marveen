@@ -1,9 +1,10 @@
 import { existsSync, readFileSync, statSync, writeFileSync, utimesSync } from 'node:fs'
+import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { execSync, execFileSync } from 'node:child_process'
 import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
-import { MAIN_AGENT_ID, BOT_NAME, CHANNEL_PROVIDER, PROJECT_ROOT } from '../config.js'
+import { MAIN_AGENT_ID, BOT_NAME, CHANNEL_PROVIDER, PROJECT_ROOT, RESPAWN_ENABLED } from '../config.js'
 import { agentDir, listAgentNames, readAgentChannelProvider } from './agent-config.js'
 import {
   agentHasChannel,
@@ -656,7 +657,16 @@ function shouldEscalateMarveenDown(): boolean {
   return now - marveenSuspectFirstSeen >= MARVEEN_DOWN_CONFIRM_MS
 }
 
-export function startChannelPluginMonitor(): NodeJS.Timeout {
+export function startChannelPluginMonitor(): NodeJS.Timeout | null {
+  // Respawn/keep-alive is production-only. On any non-production host (e.g. a
+  // local dev checkout) we never respawn the main agent or auto-restart
+  // sub-agents -- otherwise two machines would fight over the same bot tokens.
+  // Applies to ALL agents because the whole monitor loop is skipped here.
+  if (!RESPAWN_ENABLED) {
+    logger.info({ host: hostname() }, 'Channel plugin monitor disabled (respawn is production-only)')
+    return null
+  }
+
   const mainProvider = getMainAgentProvider()
 
   function check() {
