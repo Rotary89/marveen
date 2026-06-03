@@ -1,10 +1,11 @@
-import { execFile } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { resolveFromPath } from '../../platform.js'
 import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
 import { agentDir } from '../agent-config.js'
-import { agentSessionName, isAgentRunning, capturePane } from '../agent-process.js'
+import { agentSessionName, isAgentRunning } from '../agent-process.js'
+import { isMainChannelsAgent, MAIN_CHANNELS_SESSION } from '../main-agent.js'
 import { literalKeyArgs, specialKeyArgs, loginSequence, type LoginStep } from '../tmux-keys.js'
 import type { RouteContext } from './types.js'
 
@@ -17,6 +18,27 @@ const TMUX = resolveFromPath('tmux')
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function isTmuxSessionAlive(session: string): boolean {
+  try {
+    execFileSync(TMUX, ['has-session', '-t', session], { timeout: 3000, stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+// Resolve a terminal target for both sub-agents and the MAIN agent (Marveen).
+// The main agent has no agents/<name> dir and runs in `<id>-channels`, not
+// `agent-<name>` -- so the sub-agent assumptions (existsSync(agentDir) +
+// agentSessionName) 404 it (Zara hit this, 871005b). Branch on the main agent.
+interface SessionTarget { exists: boolean; running: boolean; session: string }
+function resolveTarget(name: string): SessionTarget {
+  if (isMainChannelsAgent(name)) {
+    return { exists: true, running: isTmuxSessionAlive(MAIN_CHANNELS_SESSION), session: MAIN_CHANNELS_SESSION }
+  }
+  return { exists: existsSync(agentDir(name)), running: isAgentRunning(name), session: agentSessionName(name) }
 }
 
 // Run a single `tmux <args>` invocation. Rejects on non-zero exit so the
@@ -47,8 +69,9 @@ export async function tryHandleAgentTerminal(ctx: RouteContext): Promise<boolean
   const streamMatch = path.match(/^\/api\/agents\/([^/]+)\/pane\/stream$/)
   if (streamMatch && method === 'GET') {
     const name = decodeURIComponent(streamMatch[1])
-    if (!existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
-    const session = agentSessionName(name)
+    const target = resolveTarget(name)
+    if (!target.exists) { json(res, { error: 'Agent not found' }, 404); return true }
+    const session = target.session
 
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -71,8 +94,11 @@ export async function tryHandleAgentTerminal(ctx: RouteContext): Promise<boolean
         inFlight = false
         if (closed) return
         const pane = err ? '' : (stdout ?? '')
+        // A successful capture proves the session is alive; only re-probe on
+        // capture failure (cheap, and avoids a has-session call every tick).
+        const running = err ? isTmuxSessionAlive(session) : true
         try {
-          res.write(`data: ${JSON.stringify({ pane, running: isAgentRunning(name) })}\n\n`)
+          res.write(`data: ${JSON.stringify({ pane, running })}\n\n`)
         } catch {
           closed = true
         }
@@ -91,9 +117,10 @@ export async function tryHandleAgentTerminal(ctx: RouteContext): Promise<boolean
   const keysMatch = path.match(/^\/api\/agents\/([^/]+)\/keys$/)
   if (keysMatch && method === 'POST') {
     const name = decodeURIComponent(keysMatch[1])
-    if (!existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
-    if (!isAgentRunning(name)) { json(res, { error: 'Agent is not running' }, 400); return true }
-    const session = agentSessionName(name)
+    const target = resolveTarget(name)
+    if (!target.exists) { json(res, { error: 'Agent not found' }, 404); return true }
+    if (!target.running) { json(res, { error: 'Agent is not running' }, 400); return true }
+    const session = target.session
     const body = await readBody(ctx.req)
     let parsed: { keys?: string; special?: string }
     try { parsed = JSON.parse(body.toString()) } catch { json(res, { error: 'Invalid JSON' }, 400); return true }
@@ -119,9 +146,10 @@ export async function tryHandleAgentTerminal(ctx: RouteContext): Promise<boolean
   const loginMatch = path.match(/^\/api\/agents\/([^/]+)\/login$/)
   if (loginMatch && method === 'POST') {
     const name = decodeURIComponent(loginMatch[1])
-    if (!existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
-    if (!isAgentRunning(name)) { json(res, { error: 'Agent is not running' }, 400); return true }
-    const session = agentSessionName(name)
+    const target = resolveTarget(name)
+    if (!target.exists) { json(res, { error: 'Agent not found' }, 404); return true }
+    if (!target.running) { json(res, { error: 'Agent is not running' }, 400); return true }
+    const session = target.session
     const body = await readBody(ctx.req)
     let phase: string | undefined
     try { phase = (JSON.parse(body.toString()) as { phase?: string }).phase } catch { /* default below */ }
