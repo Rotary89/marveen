@@ -67,6 +67,29 @@ def main_agent_id():
     return "marveen"
 
 
+def owner_name():
+    """The human owner's display name, used to label inbound turns in the
+    replayed conversation context. Same resolution order as main_agent_id():
+    OWNER_NAME env var first, then the install-dir .env (channels.sh does NOT
+    export OWNER_NAME into the hook environment, so the .env file is the path
+    that actually fires at runtime), finally a neutral default. Never hardcode
+    a specific person -- every install configures its own OWNER_NAME, so a
+    baked-in name (e.g. "Gyula") leaks the wrong name into every user's agent."""
+    v = os.environ.get("OWNER_NAME")
+    if v and v.strip():
+        return v.strip()
+    try:
+        with open(os.path.join(_install_dir(), ".env")) as f:
+            for line in f:
+                if line.startswith("OWNER_NAME="):
+                    name = line.split("=", 1)[1].strip()
+                    if name:
+                        return name
+    except Exception:
+        pass
+    return "A felhasználó"
+
+
 def agent_id_from_cwd(cwd):
     """Which channel agent is this session? Derived from cwd so the hooks are
     generic across all three agents and never cross-contaminate:

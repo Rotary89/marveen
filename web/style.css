@@ -1656,6 +1656,13 @@ main {
   position: relative;
   display: inline-block;
 }
+/* The plain class rules above (display:flex/inline-block) outrank the UA
+   [hidden]{display:none}, so toggling the `hidden` attribute had no effect.
+   Re-assert it with attribute+class specificity for both upload zones. */
+.avatar-upload-content[hidden],
+.avatar-upload-preview[hidden] {
+  display: none;
+}
 .avatar-upload-preview img {
   width: 80px;
   height: 80px;

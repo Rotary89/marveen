@@ -54,9 +54,11 @@ def main():
     if not rows and not open_q:
         sys.exit(0)  # nothing to replay
 
+    owner = ledger_lib.owner_name()
+
     transcript = []
     for direction, chat_id, text, ts in rows:
-        who = "Gyula" if direction == "in" else "Te"
+        who = owner if direction == "in" else "Te"
         snippet = (text or "").strip().replace("\n", " ")
         transcript.append(f'  [{ts}] {who}: "{snippet}"')
 
@@ -78,7 +80,7 @@ def main():
         chat_id, message_id, text, ts = open_q
         snippet = (text or "").strip().replace("\n", " ")
         parts.append(
-            f'NYITOTT KÉRDÉS (még NEM válaszoltad meg): Gyula utolsó üzenete '
+            f'NYITOTT KÉRDÉS (még NEM válaszoltad meg): {owner} utolsó üzenete '
             f'(chat {chat_id}, message_id {message_id}): "{snippet}". Válaszolj rá '
             f'MOST a telegram reply tool (mcp__plugin_telegram_telegram__reply) '
             f'meghívásával a megfelelő chat_id-re, a fenti kontextusból folytatva.'

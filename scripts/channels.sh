@@ -298,9 +298,67 @@ fi
 # instead of tight-looping and burning API tokens.
 START_TS=$(date +%s)
 
+# Plugin liveness watchdog (main channels session only) -- a last-resort
+# backstop UNDER the dashboard channel-monitor, not a replacement. The monitor
+# is the primary recovery, but its down-state lives in dashboard process
+# memory: a plugin that dies WHILE THE DASHBOARD ITSELF IS RESTARTING is missed
+# (the in-memory state machine resets and never re-detects it). This in-session
+# shell watchdog is independent of the dashboard. If the channel bot process
+# (tracked via the plugin's bot.pid) never comes up, OR comes up and then stays
+# dead, we exit so the service manager (launchd/systemd) restarts us with a
+# fresh Claude + plugin.
+#
+# Thresholds are deliberately COARSER than the dashboard monitor's (~60-120s)
+# so in normal operation the dashboard acts FIRST and this only fires when the
+# dashboard couldn't -- avoids double-restart races. bot.pid lives at the
+# main-agent channelStateDir(): ~/.claude/channels/<provider>/bot.pid (HOME-,
+# not INSTALL_DIR-relative; see src/channel-provider.ts channelStateDir()).
+MAIN_BOT_PID_FILE="$HOME/.claude/channels/$CHANNEL_PROVIDER/bot.pid"
+# Never-started budget: generous so a slow cold-start (WSL first-run, MCP
+# handshake + /mcp unlock retries) is never killed prematurely. The plugin
+# normally writes bot.pid within ~1-2 min; 10 min is a safe ceiling.
+PLUGIN_NEVER_STARTED_DEADLINE=$((START_TS + 600))
+# Died-after-up budget: once we have seen the plugin alive, a continuous
+# disappearance this long means it crashed and is not self-recovering.
+PLUGIN_DEAD_GRACE=180
+PLUGIN_SEEN_ONCE=false
+PLUGIN_DEAD_SINCE=0
+
 # Várakozás amíg a session él
 while $TMUX has-session -t "$SESSION" 2>/dev/null; do
   sleep 5
+
+  NOW=$(date +%s)
+  _plugin_alive=false
+  if [ -f "$MAIN_BOT_PID_FILE" ]; then
+    _bot_pid=$(cat "$MAIN_BOT_PID_FILE" 2>/dev/null | tr -d '[:space:]')
+    if [ -n "$_bot_pid" ] && [ "$_bot_pid" -gt 1 ] 2>/dev/null && kill -0 "$_bot_pid" 2>/dev/null; then
+      _plugin_alive=true
+    fi
+  fi
+  unset _bot_pid
+
+  if [ "$_plugin_alive" = "true" ]; then
+    PLUGIN_SEEN_ONCE=true
+    PLUGIN_DEAD_SINCE=0
+  elif [ "$PLUGIN_SEEN_ONCE" = "true" ]; then
+    # Was up, now gone -- start/continue the dead-grace timer (a transient
+    # gap that recovers resets it, so only a sustained death triggers exit).
+    if [ "$PLUGIN_DEAD_SINCE" -eq 0 ]; then
+      PLUGIN_DEAD_SINCE=$NOW
+      echo "WARN: $CHANNEL_PROVIDER plugin (bot.pid) disappeared -- ${PLUGIN_DEAD_GRACE}s grace before restart" >&2
+    elif [ "$((NOW - PLUGIN_DEAD_SINCE))" -ge "$PLUGIN_DEAD_GRACE" ]; then
+      echo "WARN: $CHANNEL_PROVIDER plugin dead for $((NOW - PLUGIN_DEAD_SINCE))s -- exiting for service-manager restart" >&2
+      break
+    fi
+  else
+    # Never came up at all (e.g. a Claude Code build that silently disables
+    # --channels). Give it the full cold-start budget, then restart.
+    if [ "$NOW" -ge "$PLUGIN_NEVER_STARTED_DEADLINE" ]; then
+      echo "WARN: $CHANNEL_PROVIDER plugin never started within $((PLUGIN_NEVER_STARTED_DEADLINE - START_TS))s -- exiting for service-manager restart" >&2
+      break
+    fi
+  fi
 done
 
 ELAPSED=$(( $(date +%s) - START_TS ))

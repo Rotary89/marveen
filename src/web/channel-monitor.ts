@@ -10,6 +10,7 @@ import {
   agentHasChannel,
   agentSessionName,
   capturePane,
+  clearInputBuffer,
   dismissResumeSummaryModalIfPresent,
   isAgentRunning,
   sendPromptToSession,
@@ -20,7 +21,11 @@ import {
 import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller-reap.js'
 import { probeTelegramConflict } from './channel-conflict-probe.js'
 import { schedulePluginUnlockAfterRespawn } from './channel-plugin-unlock.js'
-import { detectPaneState, decidePaneErrorAlert, type PaneErrorAlertState, type PaneState } from '../pane-state.js'
+import {
+  detectPaneState, decidePaneErrorAlert, type PaneErrorAlertState, type PaneState,
+  stuckInputSignature, decideStuckInputRecovery, parkedChannelInput,
+  type StuckInputState, type StuckInputThresholds,
+} from '../pane-state.js'
 import { MAIN_CHANNELS_SESSION, MAIN_CHANNELS_PLIST } from './main-agent.js'
 import { notifyChannel } from '../notify.js'
 import { getProvider, channelStateDir, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
@@ -68,6 +73,28 @@ const AGENT_RESTART_GRACE_MS = 90_000
 // than this on a "plugin down" reading, or the watchdog crash-loops it.
 const AGENT_STARTUP_GRACE_MS = 180_000
 const PLUGIN_ALERT_DEDUP_MS = 30 * 60 * 1000
+
+// Stuck channel-input recovery (MAIN session only). A channel notification
+// delivered while Boss is busy can be parked as plain text at the ❯ prompt
+// without being submitted ('typing' state) -- it wedges the session because
+// skipIfBusy heartbeats read 'typing' as not-idle and Boss never processes
+// the message. The parked text already carries the full
+// <channel ... chat_id=...> block, so recovery only needs to get it SUBMITTED.
+let mainStuckInput: StuckInputState = { parkedSig: null, firstSeenAt: null, lastRecoverAt: null, attempts: 0 }
+// Raw Enters tried before escalating to clear+re-inject. Enter is faithful
+// (it submits the REAL buffer, no capture-truncation risk); re-inject is the
+// fallback for a TUI that swallows the Enter in raw-mode.
+const MAIN_STUCK_ENTER_ATTEMPTS = 2
+const MAIN_STUCK_THRESHOLDS: StuckInputThresholds = {
+  // Same text must stay parked this long before the first recovery action so a
+  // turn about to submit on its own is not pre-empted (>=2 observations at the
+  // 60s tick).
+  confirmMs: 90_000,
+  // One recovery action per ~tick.
+  dedupMs: 45_000,
+  // 2 Enters + up to 2 re-injects, then hold (logged).
+  maxAttempts: 4,
+}
 
 // Per-session tracking for the wedged thinking-block error (a Claude
 // session stuck returning `400 ... thinking blocks cannot be modified`
@@ -706,6 +733,44 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         const label = t.isMarveen ? BOT_NAME : (t.agentName ?? t.session)
         logger.error({ session: t.session, agent: label }, 'Agent wedged on thinking-block API error -- manual reset needed')
         sendAlert(`🚨 A(z) ${label} agens elakadt egy thinking-block API hibaban (a session-history korrupt, minden uj prompt ugyanazt a 400-at adja). Kezi reset kell: allitsd le es inditsd ujra, friss session indul. Reszletek: tmux attach -t ${t.session}`)
+      }
+    }
+
+    // Stuck channel-input recovery (MAIN session only). Recover a channel
+    // notification stranded at the ❯ prompt by getting it SUBMITTED. The gate
+    // (parkedChannelInput != null) fires ONLY for a parked <channel> block, so
+    // a human's own hand-typed draft is never touched. Enter-first (faithful);
+    // escalate to clear+re-inject only after MAIN_STUCK_ENTER_ATTEMPTS, and
+    // only when the captured block looks COMPLETE -- a truncated capture stays
+    // on Enter rather than risk a partial re-inject to the wrong chat_id.
+    {
+      const mainPane = capturePane(MAIN_CHANNELS_SESSION)
+      const parked = mainPane != null ? parkedChannelInput(mainPane) : null
+      const sig = parked != null && mainPane != null ? stuckInputSignature(mainPane) : null
+      const decision = decideStuckInputRecovery(sig, mainStuckInput, Date.now(), MAIN_STUCK_THRESHOLDS)
+      mainStuckInput = decision.next
+      if (decision.recover && parked != null) {
+        const attempt = decision.next.attempts
+        const reinject = attempt > MAIN_STUCK_ENTER_ATTEMPTS && parked.complete && parked.block != null
+        if (reinject) {
+          logger.warn({ session: MAIN_CHANNELS_SESSION, chatId: parked.chatId, attempt }, 'Stuck channel input -- escalating to clear + verbatim re-inject')
+          try {
+            clearInputBuffer(MAIN_CHANNELS_SESSION)
+            sendPromptToSession(MAIN_CHANNELS_SESSION, parked.block!)
+          } catch (err) {
+            logger.warn({ err, session: MAIN_CHANNELS_SESSION }, 'Stuck-input re-inject failed')
+          }
+        } else {
+          // Enter-first, and the truncation-guard fallback: if escalation was
+          // due but the block looks incomplete, hold on Enter instead.
+          const heldForTruncation = attempt > MAIN_STUCK_ENTER_ATTEMPTS && !parked.complete
+          logger.warn({ session: MAIN_CHANNELS_SESSION, attempt, heldForTruncation }, 'Stuck channel input -- recovery Enter')
+          try {
+            execFileSync(TMUX, ['send-keys', '-t', MAIN_CHANNELS_SESSION, 'Enter'], { timeout: 5000 })
+          } catch (err) {
+            logger.warn({ err, session: MAIN_CHANNELS_SESSION }, 'Stuck-input recovery Enter failed')
+          }
+        }
       }
     }
 

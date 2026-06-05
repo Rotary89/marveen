@@ -374,7 +374,7 @@ const SUBMIT_RETRY_POLL_MS = '0.3'
 // Buffer-clear (Ctrl-U) used pre-flight when shouldClearTruncatedPreamble
 // flags a stale preamble. Sent as a single key name (no `-l` literal
 // flag) so tmux interprets it as the control sequence.
-function clearInputBuffer(session: string): void {
+export function clearInputBuffer(session: string): void {
   try {
     execFileSync(TMUX, ['send-keys', '-t', session, 'C-u'], { timeout: 5000 })
     // Settle briefly so the next send-keys lands in the freshly cleared

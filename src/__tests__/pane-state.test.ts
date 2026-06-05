@@ -9,6 +9,7 @@ import {
   decidePaneErrorAlert,
   stuckInputSignature,
   decideStuckInputRecovery,
+  parkedChannelInput,
 } from '../pane-state.js'
 
 // Realistic pane fixtures modelled on actual `tmux capture-pane -p`
@@ -1236,5 +1237,66 @@ describe('decideStuckInputRecovery', () => {
     expect(d.next.firstSeenAt).toBe(500_000)
     expect(d.next.lastRecoverAt).toBe(null)
     expect(d.next.attempts).toBe(0)
+  })
+})
+
+describe('parkedChannelInput (stuck channel-block gate + truncation guard)', () => {
+  const SEP = '─'.repeat(80)
+  const wrap = (boxLines: string[]) =>
+    ['', SEP, ...boxLines, SEP, '  ⏵⏵ bypass permissions on (shift+tab to cycle)'].join('\n')
+
+  it('returns null when the pane is idle (nothing parked)', () => {
+    expect(parkedChannelInput(wrap(['❯ ']))).toBeNull()
+  })
+
+  it('returns null for a HUMAN hand-typed draft (no <channel> marker) -- never touched', () => {
+    expect(parkedChannelInput(wrap(['❯ Valami amit a felhasznalo elkezdett geppelni']))).toBeNull()
+  })
+
+  it('extracts a COMPLETE single-line parked channel block with chat_id', () => {
+    const pane = wrap(['❯ <channel source="plugin:telegram:telegram" chat_id="1268077055" message_id="999" ts="2026-06-05T10:00:00Z">Szia, mi a helyzet?</channel>'])
+    const r = parkedChannelInput(pane)
+    expect(r).not.toBeNull()
+    expect(r!.complete).toBe(true)
+    expect(r!.chatId).toBe('1268077055')
+    expect(r!.block).toContain('</channel>')
+    expect(r!.block).toContain('chat_id="1268077055"')
+  })
+
+  it('reconstructs a wrapped multi-line block when chat_id stays intact', () => {
+    // Terminal wrap splits message_id but NOT chat_id -> still recoverable.
+    const pane = wrap([
+      '❯ <channel source="plugin:telegram:telegram" chat_id="1268077055" mess',
+      'age_id="999" ts="2026-06-05T10:00:00Z">Hosszu uzenet ami tobb sorba',
+      'tordelodott a terminal szelessegen.</channel>',
+    ])
+    const r = parkedChannelInput(pane)
+    expect(r).not.toBeNull()
+    expect(r!.complete).toBe(true)
+    expect(r!.chatId).toBe('1268077055')
+  })
+
+  it('flags complete:false when the closing </channel> scrolled off (truncated)', () => {
+    const pane = wrap(['❯ <channel source="plugin:telegram:telegram" chat_id="1268077055" ts="2026-06-05T10:00:00Z">Az uzenet vege lescrollozott es nincs zaro tag'])
+    const r = parkedChannelInput(pane)
+    expect(r).not.toBeNull()
+    expect(r!.complete).toBe(false)
+    expect(r!.chatId).toBeNull()
+  })
+
+  it('flags complete:false when a wrap corrupts chat_id with embedded whitespace', () => {
+    // Wrap landed INSIDE the chat_id value -> "126 8077055" after collapse.
+    const pane = wrap([
+      '❯ <channel source="plugin:telegram:telegram" chat_id="126',
+      '8077055" message_id="999">Test</channel>',
+    ])
+    const r = parkedChannelInput(pane)
+    expect(r).not.toBeNull()
+    expect(r!.complete).toBe(false) // refuse re-inject; caller stays on Enter
+    expect(r!.chatId).toBeNull()
+  })
+
+  it('returns null for a non-plugin channel marker (defensive)', () => {
+    expect(parkedChannelInput(wrap(['❯ <channel source="other:thing" chat_id="1">x</channel>']))).toBeNull()
   })
 })

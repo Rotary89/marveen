@@ -588,6 +588,49 @@ export function stuckInputSignature(pane: string): string | null {
   return sig.length > 0 ? sig : null
 }
 
+export interface ParkedChannelInput {
+  /** True only when the parked block is captured intact -- opening
+   * <channel source="plugin:..."> tag WITH a chat_id AND a closing
+   * </channel>. False when the box holds a channel block whose header has
+   * scrolled/truncated out of the capture (chat_id unrecoverable), so a
+   * caller must NOT verbatim re-inject it (a partial re-inject could answer
+   * the wrong chat_id -- worse than a delayed submit). */
+  complete: boolean
+  /** The complete <channel>...</channel> block, whitespace-collapsed, when
+   * complete; null when truncated. Safe to re-inject verbatim. */
+  block: string | null
+  /** The recovered chat_id when complete; null otherwise. */
+  chatId: string | null
+}
+
+// Classify the live input box as a stranded CHANNEL notification, or null
+// when it is not ours to touch. Returns null when the pane is not parked
+// ('typing'), the box is empty, OR the parked text is a HUMAN's own
+// hand-typed draft (no <channel source="plugin:..."> marker) -- the
+// stuck-input watcher must leave a human draft alone. When a channel block
+// IS parked, the `complete` flag is the truncation-guard: only a complete
+// capture (header + chat_id + closing tag present) is safe to re-inject.
+//
+// The captured box is whitespace-collapsed first because liveInputBox()
+// preserves the terminal-wrap newlines, which would otherwise split the
+// <channel> tag attributes across lines and defeat the match.
+export function parkedChannelInput(pane: string): ParkedChannelInput | null {
+  if (detectPaneState(pane) !== 'typing') return null
+  const box = liveInputBox(pane)
+  if (box == null) return null
+  const flat = box.replace(/\s+/g, ' ').trim()
+  if (!/<channel\s+source="plugin:/.test(flat)) return null // human draft -> not ours
+  const m = flat.match(/<channel\s+source="plugin:[^"]*"[^>]*>.*?<\/channel>/)
+  if (!m) return { complete: false, block: null, chatId: null } // opening tag only -> truncated
+  const block = m[0]
+  const cm = block.match(/\bchat_id="([^"]+)"/)
+  // A terminal wrap can land INSIDE chat_id="..."; whitespace-collapse then
+  // yields a corrupted id with an embedded space. Reject it (stay on Enter)
+  // rather than re-inject to a wrong chat_id.
+  if (!cm || /\s/.test(cm[1])) return { complete: false, block, chatId: null }
+  return { complete: true, block, chatId: cm[1] }
+}
+
 // Per-session bookkeeping for the stuck-input recovery watcher. A "spell"
 // is one continuous stretch of the SAME text parked in the input box.
 export interface StuckInputState {

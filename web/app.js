@@ -3,6 +3,16 @@
 // On first visit we pluck the token out of the URL, store it in localStorage,
 // strip it from the visible URL, and then inject it into every /api/* fetch
 // as a Bearer header so the server lets us through.
+
+// The main (channels) agent's real id. The backend /api/marveen route returns
+// the configured MAIN_AGENT_ID (NOT the literal "marveen") in window._marveen;
+// use this everywhere an agent id is sent to /api/agents/... or compared to a
+// fleet name, so the dashboard works on non-"marveen" installs. Falls back to
+// "marveen" only before /api/marveen has resolved (or on a legacy backend).
+function mainAgentId() {
+  return window._marveen?.agentId || 'marveen'
+}
+
 (() => {
   const TOKEN_KEY = 'marveen-dashboard-token'
   const urlParams = new URLSearchParams(window.location.search)
@@ -989,6 +999,7 @@ const AVATARS = [
 ]
 
 let selectedAvatar = null
+let selectedAvatarFile = null // custom upload chosen in the create wizard (deferred until the agent exists)
 let agents = []
 let currentAgent = null
 // API-safe agent id for the currently open detail modal. Sub-agents key off
@@ -1055,6 +1066,9 @@ function populateAvatarGrid() {
       grid.querySelectorAll('.avatar-grid-item').forEach(i => i.classList.remove('selected'))
       item.classList.add('selected')
       selectedAvatar = avatar
+      // Gallery pick and custom upload are mutually exclusive.
+      selectedAvatarFile = null
+      resetCreateAvatarUpload()
     })
     grid.appendChild(item)
   }
@@ -1098,7 +1112,9 @@ function resetWizard() {
   agentModel.value = 'inherit'
   loadAvailableModels()
   selectedAvatar = null
+  selectedAvatarFile = null
   document.querySelectorAll('#avatarGrid .avatar-grid-item').forEach(i => i.classList.remove('selected'))
+  resetCreateAvatarUpload()
   generatedClaudeMd = ''
   generatedSoulMd = ''
   wizardCreatedName = ''
@@ -1174,8 +1190,16 @@ document.getElementById('wizardNextBtn').addEventListener('click', async () => {
 
     statusEl.textContent = 'Kész!'
 
-    // Set gallery avatar if selected
-    if (selectedAvatar) {
+    // Apply the chosen avatar. Custom upload wins over a gallery pick; both go
+    // to the same endpoint (FormData for a file, JSON for a gallery name).
+    if (selectedAvatarFile) {
+      const form = new FormData()
+      form.append('avatar', selectedAvatarFile, selectedAvatarFile.name)
+      await fetch(`/api/agents/${encodeURIComponent(createdName)}/avatar`, {
+        method: 'POST',
+        body: form,
+      })
+    } else if (selectedAvatar) {
       await fetch(`/api/agents/${encodeURIComponent(createdName)}/avatar`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1330,7 +1354,7 @@ async function openMarveenDetail() {
   if (!m) return
 
   // Reuse the agent detail modal for Marveen
-  currentAgent = { ...m, name: 'marveen', claudeMd: '', soulMd: '', mcpJson: '', skills: [] }
+  currentAgent = { ...m, name: mainAgentId(), claudeMd: '', soulMd: '', mcpJson: '', skills: [] }
   setupAutoRestartUI(currentAgent)
 
   const displayName = m.name || 'Marveen'
@@ -1382,7 +1406,7 @@ async function openMarveenDetail() {
   // Telegram tab -- without this the tab stays in the default "not connected"
   // view even though the bot is running and receiving messages.
   updateChannelTab({
-    name: 'marveen',
+    name: mainAgentId(),
     hasTelegram: mFull.hasTelegram !== undefined ? mFull.hasTelegram : true,
     hasDiscord: mFull.hasDiscord,
     hasSlack: mFull.hasSlack,
@@ -1478,7 +1502,7 @@ function renderAgents() {
       </div>
     `
     mCard.querySelector('.agent-terminal-btn')?.addEventListener('click', (e) => {
-      e.stopPropagation(); openTerminalModal('marveen')
+      e.stopPropagation(); openTerminalModal(mainAgentId())
     })
     mCard.addEventListener('click', () => openMarveenDetail())
     agentsGrid.insertBefore(mCard, addBtn)
@@ -1768,6 +1792,69 @@ document.getElementById('avatarChangeBtn').addEventListener('click', () => {
       showToast('Hiba a feltöltés során')
       resetAvatarUpload()
     }
+  }
+})()
+
+// === Create-wizard avatar upload ===
+// Mirrors the detail-modal uploader, but the agent does not exist yet, so the
+// file is held in `selectedAvatarFile` and POSTed after creation (see the
+// wizard create flow). Hoisted so populateAvatarGrid()/resetWizard() can reset.
+function resetCreateAvatarUpload() {
+  const fileInput = document.getElementById('createAvatarFileInput')
+  const content = document.getElementById('createAvatarUploadContent')
+  const preview = document.getElementById('createAvatarUploadPreview')
+  if (!fileInput || !content || !preview) return
+  fileInput.value = ''
+  content.hidden = false
+  preview.hidden = true
+}
+;(() => {
+  const zone = document.getElementById('createAvatarUploadZone')
+  if (!zone) return
+  const fileInput = document.getElementById('createAvatarFileInput')
+  const content = document.getElementById('createAvatarUploadContent')
+  const preview = document.getElementById('createAvatarUploadPreview')
+  const previewImg = document.getElementById('createAvatarPreviewImg')
+  const clearBtn = document.getElementById('createAvatarPreviewClear')
+  const MAX_SIZE = 1024 * 1024
+
+  zone.addEventListener('click', (e) => {
+    if (e.target === clearBtn || clearBtn.contains(e.target)) return
+    fileInput.click()
+  })
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('drag-over') })
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'))
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault()
+    zone.classList.remove('drag-over')
+    const file = e.dataTransfer.files[0]
+    if (file) handleCreateAvatarFile(file)
+  })
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files[0]) handleCreateAvatarFile(fileInput.files[0])
+  })
+  clearBtn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    selectedAvatarFile = null
+    resetCreateAvatarUpload()
+  })
+
+  function handleCreateAvatarFile(file) {
+    if (!file.type.match(/^image\/(png|jpe?g|webp)$/)) {
+      showToast('Csak png/jpg/webp formátum')
+      return
+    }
+    if (file.size > MAX_SIZE) {
+      showToast('Max 1 MB méretű kép')
+      return
+    }
+    // Custom upload and gallery pick are mutually exclusive.
+    selectedAvatar = null
+    document.querySelectorAll('#avatarGrid .avatar-grid-item').forEach(i => i.classList.remove('selected'))
+    selectedAvatarFile = file
+    previewImg.src = URL.createObjectURL(file)
+    content.hidden = true
+    preview.hidden = false
   }
 })()
 
@@ -3474,7 +3561,7 @@ function renderScheduleList(tasks) {
   for (const task of tasks) {
     const row = document.createElement('div')
     row.className = 'schedule-row'
-    const agent = scheduleAgents.find(a => a.name === task.agent) || { name: task.agent || 'marveen', avatar: '/api/marveen/avatar', label: task.agent || 'marveen' }
+    const agent = scheduleAgents.find(a => a.name === task.agent) || { name: task.agent || mainAgentId(), avatar: '/api/marveen/avatar', label: task.agent || mainAgentId() }
 
     row.innerHTML = `
       <div class="schedule-agent-avatar">
@@ -3549,7 +3636,7 @@ function renderTimeline(tasks) {
   // Group tasks by agent
   const agentTasks = {}
   for (const task of tasks) {
-    const agentName = task.agent || 'marveen'
+    const agentName = task.agent || mainAgentId()
     if (!agentTasks[agentName]) agentTasks[agentName] = []
     agentTasks[agentName].push(task)
   }
@@ -3704,7 +3791,7 @@ function renderWeekView(data) {
       const count = tasks.length
 
       tasks.forEach((task, idx) => {
-        const agent = scheduleAgents.find(a => a.name === task.agent) || { name: task.agent || 'marveen', avatar: '/api/marveen/avatar' }
+        const agent = scheduleAgents.find(a => a.name === task.agent) || { name: task.agent || mainAgentId(), avatar: '/api/marveen/avatar' }
 
         const card = document.createElement('div')
         card.className = 'week-task-card'
@@ -4136,7 +4223,7 @@ function renderMemories(memories) {
     const tierBadge = tierLabels[tier] || tier
     const badgeClass = 'badge-' + tier
     const shortContent = mem.content.length > 120 ? mem.content.slice(0, 120) + '...' : mem.content
-    const agentLabel = mem.agent_id || 'marveen'
+    const agentLabel = mem.agent_id || mainAgentId()
 
     // Build keywords HTML
     let keywordsHtml = ''
@@ -4312,7 +4399,7 @@ function buildGraph(memories) {
       connectionCount: 0,
       label: label,
       tier: mem.tier || mem.category || 'warm',
-      agent: mem.agent_id || 'marveen',
+      agent: mem.agent_id || mainAgentId(),
       keywords: keywords,
       mem: mem,
       searchMatch: true,
@@ -4759,7 +4846,7 @@ function hideGraphPanel() {
 
 function openEditMemory(mem) {
   document.getElementById('memModalTitle').textContent = 'Emlék szerkesztése'
-  document.getElementById('memAgent').value = mem.agent_id || 'marveen'
+  document.getElementById('memAgent').value = mem.agent_id || mainAgentId()
   document.getElementById('memTier').value = mem.tier || mem.category || 'warm'
   document.getElementById('memContent').value = mem.content || ''
   document.getElementById('memKeywords').value = mem.keywords || ''
@@ -6307,8 +6394,8 @@ async function openConnectorDetail(connector) {
         assignedAgents.add(c.scope.replace('agent:', ''))
       }
     }
-    const mainAgent = allAgents.find(a => a.name === 'marveen')
-    const subAgents = allAgents.filter(a => a.name !== 'marveen')
+    const mainAgent = allAgents.find(a => a.name === mainAgentId())
+    const subAgents = allAgents.filter(a => a.name !== mainAgentId())
 
     const listEl = document.getElementById('connectorAgentList')
     listEl.innerHTML = ''
@@ -6698,7 +6785,7 @@ memImportSaveBtn.addEventListener('click', async () => {
 
     memImportStatus.textContent = `${allChunks.length} chunk kategorizálása és importálása...`
 
-    const agentId = document.getElementById('memImportAgent').value || 'marveen'
+    const agentId = document.getElementById('memImportAgent').value || mainAgentId()
     const resp = await fetch('/api/memories/import', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -7197,7 +7284,7 @@ function chatAvatarHtml(agentName, size = 32) {
   const lower = agentName.toLowerCase()
   const hasAvatar = chatAgentHasAvatar.get(lower)
   if (!hasAvatar) return chatMonogramEl(agentName, size)
-  const src = lower === 'marveen'
+  const src = lower === mainAgentId().toLowerCase()
     ? `/api/marveen/avatar?t=${Date.now()}`
     : `/api/agents/${encodeURIComponent(lower)}/avatar?t=${Date.now()}`
   return `<img class="chat-avatar" src="${src}" width="${size}" height="${size}" alt="${escapeHtml(agentName)}" data-agent-name="${escapeHtml(agentName)}" onerror="chatImgError(this)">`
@@ -7234,13 +7321,13 @@ async function loadChatAgentList() {
     const threads = threadsRes.ok ? await threadsRes.json() : []
 
     // Build fleet list: API agents + marveen, minus system agents
-    const fleetNames = ['marveen', ...agentsRaw.map(a => a.name || a)]
+    const fleetNames = [mainAgentId(), ...agentsRaw.map(a => a.name || a)]
       .filter(n => !CHAT_SYSTEM_AGENTS.has(n))
       .filter((n, i, arr) => arr.indexOf(n) === i)
 
     // Populate avatar map from API data
     chatAgentHasAvatar.clear()
-    chatAgentHasAvatar.set('marveen', true)
+    chatAgentHasAvatar.set(mainAgentId(), true)
     for (const a of agentsRaw) {
       if (a.name) chatAgentHasAvatar.set(a.name, !!a.hasAvatar)
     }
@@ -7375,8 +7462,8 @@ async function loadChatThread(agentName) {
 }
 
 function buildBubbleHtml(m) {
-  const isOutgoing = m.from_agent === 'marveen'
-  const senderName = isOutgoing ? 'marveen' : m.from_agent
+  const isOutgoing = m.from_agent === mainAgentId()
+  const senderName = isOutgoing ? mainAgentId() : m.from_agent
   const when = m.created_at ? new Date(m.created_at * 1000).toLocaleString('hu-HU', {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : ''
   const statusMeta = MSG_STATUS_META[m.status] || { label: m.status || '', cls: 'badge' }
   return `<div class="chat-bubble-row ${isOutgoing ? 'outgoing' : 'incoming'}" data-msg-id="${m.id}">
@@ -7390,7 +7477,7 @@ function buildBubbleHtml(m) {
       <div class="bubble-text">${escapeHtml(m.content || '')}</div>
       <div class="bubble-time">${when}</div>
     </div>
-    ${isOutgoing ? `<div class="chat-bubble-avatar">${chatAvatarHtml('marveen', 28)}</div>` : ''}
+    ${isOutgoing ? `<div class="chat-bubble-avatar">${chatAvatarHtml(mainAgentId(), 28)}</div>` : ''}
   </div>`
 }
 
