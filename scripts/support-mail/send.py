@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Send an email FROM support@aiamindennapokban.hu via Hostinger SMTP (implicit TLS:465).
+"""Send an email FROM the configured support mailbox via SMTP (implicit TLS:465).
 
 Usage:
   python3 send.py --to a@b.hu --subject "..." --body "..." [--cc you@example.com] [--html]
 Body can also be piped on stdin if --body is omitted.
-Password is pulled from the vault at runtime (never stored/printed).
+Mailbox / hosts come from config (.env); password is pulled from the vault at
+runtime (never stored/printed). --html sends the body as an HTML alternative.
 """
-import sys, ssl, smtplib, argparse
+import sys, os, ssl, smtplib, argparse
 from email.message import EmailMessage
-sys.path.insert(0, "/Users/marvin/ClaudeClaw/scripts/support-mail")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lib
 
 
@@ -23,7 +24,7 @@ def main():
     body = a.body if a.body is not None else sys.stdin.read()
 
     msg = EmailMessage()
-    msg["From"] = f"AI a mindennapokban support <{lib.EMAIL}>"
+    msg["From"] = f"{lib.FROM_NAME} <{lib.EMAIL}>"
     msg["To"] = a.to
     if a.cc:
         msg["Cc"] = a.cc
@@ -35,10 +36,12 @@ def main():
         msg.set_content(body)
 
     rcpts = [a.to] + ([a.cc] if a.cc else [])
-    # FQDN EHLO name is REQUIRED: Hostinger SMTP rejects EHLO with a private/bare IP
-    # ([192.168.x.x]) -> "421 4.4.2 timeout exceeded". local_hostname forces a proper FQDN.
+    # FQDN EHLO name is REQUIRED: some SMTP providers reject EHLO with a private/bare
+    # IP ([192.168.x.x]) -> "421 4.4.2 timeout exceeded". local_hostname forces a
+    # proper FQDN; derive it from the mailbox domain.
+    ehlo_host = lib.EMAIL.split("@")[-1] if "@" in lib.EMAIL else "localhost"
     with smtplib.SMTP_SSL(lib.SMTP_HOST, lib.SMTP_PORT,
-                          local_hostname="aiamindennapokban.hu",
+                          local_hostname=ehlo_host,
                           context=ssl.create_default_context(), timeout=45) as s:
         s.login(lib.EMAIL, lib.password())
         s.send_message(msg, to_addrs=rcpts)

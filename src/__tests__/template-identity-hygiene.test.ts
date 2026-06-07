@@ -99,6 +99,32 @@ describe('shipped templates carry no hardcoded identity', () => {
     }
     expect(violations, `Hardcoded identity found in shipped templates:\n${violations.join('\n')}`).toEqual([])
   })
+
+  // scripts/support-mail ships operator tooling that talks to a real mailbox.
+  // It must carry no operator identity either: the mailbox address, vault key,
+  // owner name and branding flow from config (.env) / {{...}} placeholders, so a
+  // committed file must not bake in an absolute home path, a personal email, or
+  // the default owner-name literal.
+  it('scripts/support-mail carries no absolute home path, personal email, or default owner-name literal', () => {
+    const violations: string[] = []
+    for (const file of walk(join(REPO_ROOT, 'scripts', 'support-mail'))) {
+      const text = readText(file)
+      if (text === null) continue
+      const rel = file.slice(REPO_ROOT.length + 1)
+      text.split('\n').forEach((line, i) => {
+        if (!line.includes('://') && HOME_PATH_RX.test(line)) {
+          violations.push(`${rel}:${i + 1} absolute home path (derive from __file__): ${line.trim().slice(0, 100)}`)
+        }
+        if (PERSONAL_EMAIL_RX.test(line)) {
+          violations.push(`${rel}:${i + 1} personal email: ${line.trim().slice(0, 100)}`)
+        }
+        if (FOREIGN_DEFAULT_OWNER_RX.test(line)) {
+          violations.push(`${rel}:${i + 1} default owner name literal (use config / {{SUPPORT_SIGNATURE}}): ${line.trim().slice(0, 100)}`)
+        }
+      })
+    }
+    expect(violations, `Hardcoded identity found in scripts/support-mail:\n${violations.join('\n')}`).toEqual([])
+  })
 })
 
 describe('runtime-seeded placeholders are all substituted', () => {

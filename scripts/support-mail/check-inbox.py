@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""List recent messages in the support@aiamindennapokban.hu INBOX (read-only).
+"""List recent messages in the configured support mailbox INBOX (read-only).
 
 Usage: python3 check-inbox.py [N]   (default N=10 most recent)
 Prints: index, date, from, subject, unread-flag. Bodies are NOT fetched here.
 """
-import sys, ssl, imaplib, email
+import sys, os, ssl, imaplib, email
 from email.header import decode_header
-sys.path.insert(0, "/Users/marvin/ClaudeClaw/scripts/support-mail")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lib
 
 

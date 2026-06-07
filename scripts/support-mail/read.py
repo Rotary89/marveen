@@ -5,9 +5,9 @@ Usage: python3 read.py <imap_id>
 Prints: From, Subject, Date, then the plain-text body (HTML stripped to text if needed).
 Does NOT mark the message as read (uses BODY.PEEK).
 """
-import sys, ssl, imaplib, email, re
+import sys, os, ssl, imaplib, email, re
 from email.header import decode_header
-sys.path.insert(0, "/Users/marvin/ClaudeClaw/scripts/support-mail")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lib
 
 
