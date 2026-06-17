@@ -13,6 +13,8 @@ fi
 
 TOKEN=$(grep '^TELEGRAM_BOT_TOKEN=' "$ENV_FILE" | cut -d= -f2-)
 CHAT_ID=$(grep '^ALLOWED_CHAT_ID=' "$ENV_FILE" | cut -d= -f2-)
+MAIN_AGENT_ID=$(grep '^MAIN_AGENT_ID=' "$ENV_FILE" | head -1 | cut -d= -f2-)
+MAIN_AGENT_ID="${MAIN_AGENT_ID:-marveen}"
 
 if [ -z "$TOKEN" ]; then
   echo "Hiba: TELEGRAM_BOT_TOKEN nincs beallitva"
@@ -28,6 +30,33 @@ MESSAGE="$1"
 if [ -z "$MESSAGE" ]; then
   echo "Hasznalat: $0 \"uzenet\""
   exit 1
+fi
+
+# Sender attribution: notify.sh always uses the main bot token, so without this
+# every notification reads as the main bot. Detect the calling agent from the
+# tmux session name and prefix the message when it is NOT the main agent, so the
+# reader can see who it came from. Distribution-safe: the main agent id is read
+# from .env (default marveen), no hardcoded names.
+SENDER=""
+SESS=$(tmux display-message -p '#S' 2>/dev/null)
+case "$SESS" in
+  agent-*)
+    SENDER="${SESS#agent-}"
+    ;;
+  "${MAIN_AGENT_ID}-channels"|"${MAIN_AGENT_ID}-worker")
+    SENDER="$MAIN_AGENT_ID"
+    ;;
+  *)
+    SENDER=""
+    ;;
+esac
+
+if [ -n "$SENDER" ] && [ "$SENDER" != "$MAIN_AGENT_ID" ]; then
+  # Capitalize the first letter (bash 3.2 portable -- no ${var^}).
+  _first=$(printf '%s' "${SENDER%"${SENDER#?}"}" | tr '[:lower:]' '[:upper:]')
+  SENDER_CAP="${_first}${SENDER#?}"
+  MESSAGE="🤖 ${SENDER_CAP}:
+${MESSAGE}"
 fi
 
 curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
