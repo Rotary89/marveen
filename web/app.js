@@ -96,9 +96,24 @@ function mainAgentId() {
     const input = overlay.querySelector('#mv-token-input')
     const errEl = overlay.querySelector('#mv-token-err')
     const submit = () => {
-      const v = (input.value || '').trim()
-      if (!v) { errEl.textContent = 'Üres token.'; return }
-      localStorage.setItem(tokenKey, v)
+      const raw = (input.value || '').trim()
+      if (!raw) { errEl.textContent = 'Üres token.'; return }
+      // Accept either a bare token or the whole startup URL (the user often
+      // pastes the full https://host/?token=... link). Pull just the token out.
+      let token = raw
+      if (raw.includes('token=')) {
+        let extracted = null
+        try { extracted = new URL(raw).searchParams.get('token') } catch { /* not a full URL */ }
+        if (!extracted) {
+          // covers ?token=, &token=, and the hash form (/#...?token=...)
+          const m = raw.match(/[?&#]token=([^&#\s]+)/)
+          if (m) extracted = m[1]
+        }
+        if (extracted) { try { token = decodeURIComponent(extracted) } catch { token = extracted } }
+      }
+      token = token.trim()
+      if (!token) { errEl.textContent = 'Üres token.'; return }
+      localStorage.setItem(tokenKey, token)
       window.location.reload()
     }
     overlay.querySelector('#mv-token-save').addEventListener('click', submit)
