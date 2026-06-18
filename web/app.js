@@ -47,13 +47,62 @@ function mainAgentId() {
       localStorage.removeItem(TOKEN_KEY)
       if (!window.__marveenAuthPrompted) {
         window.__marveenAuthPrompted = true
-        alert(
-          'Dashboard authentication failed. Check the server log for the access URL ' +
-          '(look for "Dashboard access URL" with ?token=...), then reopen it in your browser.'
-        )
+        // An installed (home-screen) PWA has its own localStorage, separate from
+        // Safari's, and the manifest start_url has no ?token=, so the very first
+        // standalone launch is token-less and 401s. There is no address bar to
+        // paste a ?token= URL into either. Offer an in-app paste field that
+        // writes the token to the app's own storage, then reload.
+        const isStandalone = window.navigator.standalone === true ||
+          (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)
+        if (isStandalone) {
+          showStandaloneTokenPrompt(TOKEN_KEY)
+        } else {
+          alert(
+            'Dashboard authentication failed. Check the server log for the access URL ' +
+            '(look for "Dashboard access URL" with ?token=...), then reopen it in your browser.'
+          )
+        }
       }
     }
     return res
+  }
+
+  // Full-screen, one-time token paste for installed PWAs (see the 401 handler).
+  // The user pastes the access token (the value after ?token= in the server's
+  // startup URL, or from the dashboard Settings / mobile-login QR); it is saved
+  // to this app instance's localStorage and the page reloads authenticated.
+  function showStandaloneTokenPrompt(tokenKey) {
+    if (document.getElementById('mv-token-overlay')) return
+    const overlay = document.createElement('div')
+    overlay.id = 'mv-token-overlay'
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:99999;background:#1a1917;color:#faf9f5;' +
+      'display:flex;align-items:center;justify-content:center;padding:24px;' +
+      'font-family:system-ui,-apple-system,sans-serif'
+    overlay.innerHTML =
+      '<div style="max-width:420px;width:100%;display:flex;flex-direction:column;gap:14px">' +
+        '<h2 style="margin:0;font-size:18px;text-align:center">Hozzáférés szükséges</h2>' +
+        '<p style="margin:0;font-size:14px;opacity:0.8;line-height:1.5;text-align:center">' +
+          'A home-screen app saját tárhelye még üres. Illeszd be a dashboard access tokent ' +
+          '(a szerver indítási URL-jében a ?token= utáni rész, vagy a Beállítások / mobil-login QR), ' +
+          'és elmentődik ehhez az apphoz.</p>' +
+        '<textarea id="mv-token-input" rows="3" autocapitalize="off" autocorrect="off" spellcheck="false" ' +
+          'style="width:100%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid #555;' +
+          'background:#0f0e0d;color:#faf9f5;font-size:14px;font-family:monospace" placeholder="token..."></textarea>' +
+        '<button id="mv-token-save" style="padding:12px;border:0;border-radius:8px;background:#10b981;' +
+          'color:#fff;font-size:15px;font-weight:600">Mentés és újratöltés</button>' +
+        '<div id="mv-token-err" style="color:#f87171;font-size:13px;min-height:16px;text-align:center"></div>' +
+      '</div>'
+    document.body.appendChild(overlay)
+    const input = overlay.querySelector('#mv-token-input')
+    const errEl = overlay.querySelector('#mv-token-err')
+    const submit = () => {
+      const v = (input.value || '').trim()
+      if (!v) { errEl.textContent = 'Üres token.'; return }
+      localStorage.setItem(tokenKey, v)
+      window.location.reload()
+    }
+    overlay.querySelector('#mv-token-save').addEventListener('click', submit)
+    setTimeout(() => input.focus(), 50)
   }
 })()
 
