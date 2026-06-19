@@ -2230,6 +2230,12 @@ function renderAgents() {
   if (window._marveen) {
     const m = window._marveen
     const displayName = m.name || 'Marveen'
+    // The model is no longer hardcoded: /api/marveen reports the configured
+    // model (readActiveModelFromProjectDir). Mirror the sub-agent card, which
+    // uses the model value as both the badge label and class. Fall back to
+    // 'opus' only before /api/marveen has resolved (or on a legacy backend).
+    const mainModelLabel = m.model || 'opus'
+    const mainModelClass = m.model || 'opus'
     const mCard = document.createElement('div')
     mCard.className = 'agent-card marveen-card'
     mCard.innerHTML = `
@@ -2241,7 +2247,7 @@ function renderAgents() {
         </div>
       </div>
       <div class="agent-card-footer">
-        <span class="agent-model-badge opus">opus</span>
+        <span class="agent-model-badge ${escapeHtml(mainModelClass)}">${escapeHtml(mainModelLabel)}</span>
         <span class="process-indicator" title="Fut: a fő asszisztens mindig a --channels session-ben fut. Ez a kártya fixen Fut állapotot mutat, nincs per-ágens tmux-ellenőrzés."><span class="process-dot running"></span>Fut</span>
         <span class="tg-status" title="Online: a fő asszisztens csatornáját a --channels session kezeli, ezért fixen online (nincs külön token-ellenőrzés)."><span class="tg-dot connected"></span>Online</span>
       </div>
