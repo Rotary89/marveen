@@ -23,7 +23,7 @@ export const HARDCODED_DEFAULT_PROFILE: ProfileTemplate = {
   label: 'Alapértelmezett',
   description: 'Permissive fallback.',
   permissionMode: 'permissive',
-  filesystem: { allow: [], deny: ['mcp__claude_ai_Supabase__*'] },
+  filesystem: { allow: [], deny: [] },
 }
 
 export function listProfileTemplates(): ProfileTemplate[] {
