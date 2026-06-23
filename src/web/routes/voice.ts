@@ -5,7 +5,8 @@
 // TTS: POST /api/voice/tts     -- synthesize text to ogg/opus, send via Telegram sendVoice
 // Config: GET/PUT /api/agents/:id/voice-config  (handled in agents.ts; see there)
 // Modality: GET /api/voice/modality?agent=X&chat=Y
-//           POST /api/voice/modality/set -- set last inbound modality (called by channel plugin)
+//           POST /api/voice/modality/set -- set last inbound modality (future plugin hook use)
+// Directive: GET /api/voice/directive?agent=X&chat=Y  -- TTS curl string for UserPromptSubmit hook
 //
 // Security:
 //   - voiceModel is whitelisted against KNOWN_VOICE_MODELS (no path traversal)
@@ -19,8 +20,9 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
-import { KNOWN_VOICE_MODELS, AGENTS_BASE_DIR } from '../agent-config.js'
+import { KNOWN_VOICE_MODELS, AGENTS_BASE_DIR, readAgentVoiceConfig } from '../agent-config.js'
 import { getLastInboundModality, setLastInboundModality } from '../voice-modality.js'
+import { buildTtsDirective, resolveAgentChannelStateDir } from '../voice-directive.js'
 import { PROJECT_ROOT } from '../../config.js'
 import type { RouteContext } from './types.js'
 
@@ -87,6 +89,23 @@ let _installInProgress = false
 
 export async function tryHandleVoice(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method } = ctx
+
+  // GET /api/voice/directive?agent=X&chat=Y
+  // Returns the pre-filled TTS curl directive string for the UserPromptSubmit hook.
+  // Resolves state_dir (sub-agent aware) and voiceModel from the agent's voice-config.
+  // Returns { directive: string|null } -- null if responseMode===text or token missing.
+  if (path === '/api/voice/directive' && method === 'GET') {
+    const agentId = ctx.url.searchParams.get('agent') ?? ''
+    const chatId = ctx.url.searchParams.get('chat') ?? ''
+    if (!agentId || !/^[a-zA-Z0-9_-]+$/.test(agentId)) { json(res, { error: 'Invalid agent' }, 400); return true }
+    if (!chatId || !/^\d+$/.test(chatId)) { json(res, { error: 'Invalid chat_id' }, 400); return true }
+    const voiceCfg = readAgentVoiceConfig(agentId)
+    if (voiceCfg.responseMode === 'text') { json(res, { directive: null }); return true }
+    const stateDir = resolveAgentChannelStateDir(agentId, 'telegram')
+    const directive = buildTtsDirective({ chatId, stateDir, voiceModel: voiceCfg.voiceModel ?? 'hu_HU-imre-medium' })
+    json(res, { directive })
+    return true
+  }
 
   // GET /api/voice/modality?agent=X&chat=Y
   // Returns the last inbound modality for this agent+chat (for the channel plugin).

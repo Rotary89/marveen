@@ -1,6 +1,22 @@
 import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { homedir } from 'node:os'
 import { STORE_DIR, WEB_PORT } from '../config.js'
+import { AGENTS_BASE_DIR } from './agent-config.js'
+
+// Resolve the directory where an agent's channel plugin stores its bot .env.
+// Search order:
+//   1. <AGENTS_BASE_DIR>/<agentId>/.claude/channels/<provider>   (sub-agent own channel)
+//   2. ~/.claude/channels/<provider>-<agentId>                   (alternative naming)
+//   3. ~/.claude/channels/<provider>                             (global fallback / main agent)
+export function resolveAgentChannelStateDir(agentId: string, provider: string): string {
+  const candidates = [
+    join(AGENTS_BASE_DIR, agentId, '.claude', 'channels', provider),
+    join(homedir(), '.claude', 'channels', `${provider}-${agentId}`),
+    join(homedir(), '.claude', 'channels', provider),
+  ]
+  return candidates.find((d) => existsSync(join(d, '.env'))) ?? candidates[candidates.length - 1]
+}
 
 // Build a ready-to-run TTS directive block injected after the STT transcript.
 // Returns null if the dashboard token cannot be read.

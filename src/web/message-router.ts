@@ -1,6 +1,6 @@
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, STORE_DIR, WEB_PORT } from '../config.js'
-import { buildTtsDirective } from './voice-directive.js'
+import { resolveAgentChannelStateDir } from './voice-directive.js'
 import {
   getPendingMessages,
   markMessageDelivered,
@@ -164,17 +164,12 @@ export function startMessageRouter(): NodeJS.Timeout {
           setLastInboundModality(msg.to_agent, chatId, 'voice')
           if (voiceCfg.responseMode !== 'text') {
             // Attempt STT; on failure fall through to raw voice block.
-            const sttResult = await callVoiceSTT(voiceFileId, msg.to_agent)
-            if (sttResult) {
-              deliveryContent = injectTranscript(msg.content, sttResult.transcript)
+            const transcript = await callVoiceSTT(voiceFileId, msg.to_agent)
+            if (transcript) {
+              deliveryContent = injectTranscript(msg.content, transcript)
               logger.info({ id: msg.id, agent: msg.to_agent }, 'message-router: voice STT applied')
-              // Append ready-to-run TTS directive so the agent replies with voice.
-              const ttsDirective = buildTtsDirective({
-                chatId,
-                stateDir: sttResult.stateDir,
-                voiceModel: voiceCfg.voiceModel ?? 'hu_HU-imre-medium',
-              })
-              if (ttsDirective) deliveryContent += ttsDirective
+              // TTS directive is injected by the UserPromptSubmit hook (voice-reply-directive.py)
+              // which fires on every delivery path, not just coordinator-relay.
             } else {
               logger.warn({ id: msg.id, agent: msg.to_agent }, 'message-router: STT failed, delivering raw voice block')
             }
@@ -254,34 +249,21 @@ function injectTranscript(content: string, transcript: string): string {
 }
 
 // Call the dashboard /api/voice/stt endpoint (localhost, same process).
-// Returns { transcript, stateDir } on success, null on failure.
-async function callVoiceSTT(
-  fileId: string,
-  agentId: string,
-): Promise<{ transcript: string; stateDir: string } | null> {
+// Returns the transcript string on success, null on failure.
+async function callVoiceSTT(fileId: string, agentId: string): Promise<string | null> {
   try {
-    const { homedir } = await import('node:os')
-    const { join } = await import('node:path')
     const { readFileSync, existsSync } = await import('node:fs')
+    const { join } = await import('node:path')
 
-    // Resolve the agent's channel state_dir (where its bot .env lives).
-    const stateDir = join(homedir(), '.claude', 'channels', 'telegram')
-    // For sub-agents the channel dir may differ; fall back to the global one.
-    const agentChannelDir = join(homedir(), '.claude', 'channels', 'telegram')
-    const candidateDirs = [
-      join(homedir(), '.claude', 'channels', `telegram-${agentId}`),
-      agentChannelDir,
-    ]
-    const resolvedDir = candidateDirs.find((d) => existsSync(join(d, '.env'))) ?? stateDir
+    // Resolve the agent's channel state_dir using the canonical helper so
+    // sub-agents (whose .env lives under AGENTS_BASE_DIR) are found correctly.
+    const resolvedDir = resolveAgentChannelStateDir(agentId, 'telegram')
 
-    const { readFileSync: rfs } = await import('node:fs')
-    const tokenFile = join(resolvedDir, '.env')
-    if (!existsSync(tokenFile)) return null
+    if (!existsSync(join(resolvedDir, '.env'))) return null
 
-    // Read dashboard token for the API call
     const tokenPath = join(STORE_DIR, '.dashboard-token')
     if (!existsSync(tokenPath)) return null
-    const dashToken = rfs(tokenPath, 'utf-8').trim()
+    const dashToken = readFileSync(tokenPath, 'utf-8').trim()
 
     const body = JSON.stringify({ file_id: fileId, state_dir: resolvedDir })
     const resp = await fetch(`http://127.0.0.1:${WEB_PORT}/api/voice/stt`, {
@@ -292,8 +274,7 @@ async function callVoiceSTT(
     })
     if (!resp.ok) return null
     const data = await resp.json() as { transcript?: string }
-    if (!data.transcript) return null
-    return { transcript: data.transcript, stateDir: resolvedDir }
+    return data.transcript ?? null
   } catch (err) {
     logger.warn({ err }, 'message-router: callVoiceSTT error')
     return null

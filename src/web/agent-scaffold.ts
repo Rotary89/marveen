@@ -65,8 +65,23 @@ export function ensureAgentHooks(name: string): boolean {
   if (existsSync(settingsPath)) {
     try { existing = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { /* overwrite */ }
   }
-  if (existing.hooks) return false  // user already has hooks, leave alone
-  existing.hooks = tpl.hooks
+  const tplHooks = tpl.hooks as Record<string, unknown>
+  if (existing.hooks) {
+    // Key-level merge: add hook event types that are missing, leave existing ones intact.
+    // This handles agents that already have some hooks (e.g. PreCompact) but are missing
+    // newly added ones (e.g. UserPromptSubmit).
+    const existingHooks = existing.hooks as Record<string, unknown>
+    let added = false
+    for (const [event, handlers] of Object.entries(tplHooks)) {
+      if (!existingHooks[event]) {
+        existingHooks[event] = handlers
+        added = true
+      }
+    }
+    if (!added) return false
+  } else {
+    existing.hooks = tplHooks
+  }
   mkdirSync(join(agentDir(name), '.claude'), { recursive: true })
   atomicWriteFileSync(settingsPath, JSON.stringify(existing, null, 2))
   return true

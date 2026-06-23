@@ -27,6 +27,17 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{PROJECT_ROOT}}/scripts/hooks/voice-reply-directive.py",
+            "timeout": 8
+          }
+        ]
+      }
     ]
   }
 }
