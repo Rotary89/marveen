@@ -3,7 +3,7 @@
 # Usage: stt.sh <file_id> [state_dir]
 # state_dir defaults to the agent's own telegram channel dir (cwd-based) or global.
 set -euo pipefail
-DEST="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd || echo "$HOME/.local/share/atlas-whisper")"
+DEST="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd || echo "$HOME/.local/share/marveen-voice")"
 # When installed to INSTALL_DIR, the parent is INSTALL_DIR itself.
 # Detect: if _vtools.py is in the same dir as this script, use that dir.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

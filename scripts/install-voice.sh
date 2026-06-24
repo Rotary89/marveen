@@ -5,14 +5,14 @@
 #           + Hungarian TTS voice models (imre, anna) + fleet helper scripts.
 #
 # Usage:
-#   ./scripts/install-voice.sh                     # installs to ~/.local/share/atlas-whisper
+#   ./scripts/install-voice.sh                     # installs to ~/.local/share/marveen-voice
 #   INSTALL_DIR=/custom/path ./scripts/install-voice.sh
 #
 # Safe to re-run (idempotent): skips already-completed steps.
 # Opt-in: this script is NOT run by the main dashboard installer.
 set -euo pipefail
 
-DEST="${INSTALL_DIR:-$HOME/.local/share/atlas-whisper}"
+DEST="${INSTALL_DIR:-$HOME/.local/share/marveen-voice}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VOICE_SRC="$REPO_ROOT/scripts/voice"
 

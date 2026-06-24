@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [[ -f "$SCRIPT_DIR/_vtools.py" ]]; then
   DEST="$SCRIPT_DIR"
 else
-  DEST="$HOME/.local/share/atlas-whisper"
+  DEST="$HOME/.local/share/marveen-voice"
 fi
 VOICE_ARG="${1:?usage: tts.sh <voice> <chat_id> <text...>}"; shift
 CHAT_ID="${1:?missing chat_id}"; shift

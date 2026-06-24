@@ -26,7 +26,7 @@ import { buildTtsDirective, resolveAgentChannelStateDir } from '../voice-directi
 import { PROJECT_ROOT } from '../../config.js'
 import type { RouteContext } from './types.js'
 
-const VOICE_DIR = join(homedir(), '.local', 'share', 'atlas-whisper')
+const VOICE_DIR = join(homedir(), '.local', 'share', 'marveen-voice')
 const VTOOLS_PY = join(VOICE_DIR, '_vtools.py')
 const VENV_PY = join(VOICE_DIR, 'venv', 'bin', 'python')
 
