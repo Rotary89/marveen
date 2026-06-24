@@ -5,7 +5,7 @@ import { PROJECT_ROOT, OWNER_NAME, MAIN_AGENT_ID, BOT_NAME, CHANNEL_PROVIDER, WE
 import { channelStateDir } from '../channel-provider.js'
 import { runAgent } from '../agent.js'
 import { atomicWriteFileSync } from './atomic-write.js'
-import { agentDir } from './agent-config.js'
+import { agentDir, agentConfigRoot } from './agent-config.js'
 import { resolveProfilePlaceholders, type ProfileTemplate } from './profiles.js'
 
 // Identity values the template substitution injects. Pulled out so the
@@ -45,12 +45,21 @@ export function resolveTemplatePlaceholders(content: string): string {
   })
 }
 
+// Return the settings.json path for an agent.
+// The main agent's settings live at ~/.claude/settings.json (not inside agents/).
+function agentSettingsPath(name: string): string {
+  if (name === MAIN_AGENT_ID) return join(homedir(), '.claude', 'settings.json')
+  return join(agentDir(name), '.claude', 'settings.json')
+}
+
 // Idempotent migration: every agent's settings.json should carry the
 // PreCompact hook (memory save + skill reflection). Pre-refactor agents
 // were scaffolded before scaffoldAgentDir seeded the template, so their
 // file is permissions-only. Merge the template's hooks block in place.
+// Also handles the main agent (MAIN_AGENT_ID) whose settings.json is at
+// ~/.claude/settings.json -- voice hook is added alongside existing hooks.
 export function ensureAgentHooks(name: string): boolean {
-  const settingsPath = join(agentDir(name), '.claude', 'settings.json')
+  const settingsPath = agentSettingsPath(name)
   const tplPath = join(PROJECT_ROOT, 'templates', 'settings.json.template')
   if (!existsSync(tplPath)) return false
   let tpl: Record<string, unknown>
@@ -68,11 +77,11 @@ export function ensureAgentHooks(name: string): boolean {
   const tplHooks = tpl.hooks as Record<string, unknown>
   type HookEntry = { hooks?: Array<{ command?: string; timeout?: number; [k: string]: unknown }> }
   if (existing.hooks) {
-    // Key-level merge: add hook event types that are missing, leave existing ones intact.
-    // This handles agents that already have some hooks (e.g. PreCompact) but are missing
-    // newly added ones (e.g. UserPromptSubmit).
-    // Additionally, sync the timeout of any command hook whose command matches the template
-    // but whose timeout differs (e.g. 8 -> 60 for voice STT).
+    // Merge strategy:
+    //   1. If a hook event is entirely missing: add it wholesale.
+    //   2. If the event exists: add any template hook commands not yet present
+    //      as a new hook group entry (preserves existing hooks like telegram_progress.py).
+    //   3. Sync the timeout of any command hook whose command matches but timeout differs.
     const existingHooks = existing.hooks as Record<string, unknown>
     let changed = false
     for (const [event, handlers] of Object.entries(tplHooks)) {
@@ -82,7 +91,20 @@ export function ensureAgentHooks(name: string): boolean {
       } else {
         const tplEntries = handlers as HookEntry[]
         const existEntries = existingHooks[event] as HookEntry[]
+        // Collect all command strings already present in this event's hook groups.
+        const existingCommands = new Set(
+          existEntries.flatMap((e) => (e.hooks ?? []).map((h) => h.command).filter(Boolean)),
+        )
         for (const tplEntry of tplEntries) {
+          // Add hooks that are missing (as a new group entry, preserving sibling hooks).
+          const newHooks = (tplEntry.hooks ?? []).filter(
+            (h) => h.command && !existingCommands.has(h.command),
+          )
+          if (newHooks.length > 0) {
+            existEntries.push({ ...tplEntry, hooks: newHooks })
+            changed = true
+          }
+          // Sync timeouts for hooks that already exist with a stale timeout.
           for (const tplHook of tplEntry.hooks ?? []) {
             if (!tplHook.command || tplHook.timeout == null) continue
             for (const existEntry of existEntries) {
@@ -101,7 +123,8 @@ export function ensureAgentHooks(name: string): boolean {
   } else {
     existing.hooks = tplHooks
   }
-  mkdirSync(join(agentDir(name), '.claude'), { recursive: true })
+  // For the main agent, ~/.claude already exists; sub-agents need the dir created.
+  if (name !== MAIN_AGENT_ID) mkdirSync(join(agentDir(name), '.claude'), { recursive: true })
   atomicWriteFileSync(settingsPath, JSON.stringify(existing, null, 2))
   return true
 }

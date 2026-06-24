@@ -383,7 +383,7 @@ export const DEFAULT_VOICE_CONFIG: AgentVoiceConfig = {
 }
 
 export function readAgentVoiceConfig(name: string): AgentVoiceConfig {
-  const configPath = join(agentDir(name), 'agent-config.json')
+  const configPath = join(agentConfigRoot(name), 'agent-config.json')
   try {
     const config = JSON.parse(readFileOr(configPath, '{}'))
     const vc = (config.voice ?? {}) as Partial<AgentVoiceConfig>
@@ -407,7 +407,7 @@ export function writeAgentVoiceConfig(name: string, patch: Partial<AgentVoiceCon
   if (patch.voiceModel !== undefined && !KNOWN_VOICE_MODELS.has(patch.voiceModel)) {
     throw new Error(`Unknown voiceModel: ${patch.voiceModel}`)
   }
-  const configPath = join(agentDir(name), 'agent-config.json')
+  const configPath = join(agentConfigRoot(name), 'agent-config.json')
   let config: Record<string, unknown> = {}
   try { config = JSON.parse(readFileOr(configPath, '{}')) } catch {}
   const current = readAgentVoiceConfig(name)

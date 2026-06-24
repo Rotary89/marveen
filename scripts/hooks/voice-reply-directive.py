@@ -48,6 +48,18 @@ def _token():
         return ""
 
 
+def _main_agent_id():
+    """Read MAIN_AGENT_ID from .env; fall back to 'marveen'."""
+    try:
+        with open(os.path.join(_project_root(), ".env")) as f:
+            for line in f:
+                if line.startswith("MAIN_AGENT_ID="):
+                    return line.split("=", 1)[1].strip().strip('"\'')
+    except Exception:
+        pass
+    return "marveen"
+
+
 def _agent_id(cwd):
     if not cwd:
         return None
@@ -56,6 +68,11 @@ def _agent_id(cwd):
         i = parts.index("agents")
         if i + 1 < len(parts):
             return parts[i + 1]
+    # Fallback: if cwd is the project root itself (main agent session),
+    # use MAIN_AGENT_ID so voice config and state_dir resolve correctly.
+    project_root = os.path.normpath(_project_root())
+    if os.path.normpath(cwd) == project_root:
+        return _main_agent_id()
     return None
 
 

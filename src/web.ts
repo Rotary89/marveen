@@ -2,7 +2,7 @@ import http from 'node:http'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { execSync, execFileSync } from 'node:child_process'
-import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL, DASHBOARD_ALLOWED_ORIGINS } from './config.js'
+import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL, DASHBOARD_ALLOWED_ORIGINS, MAIN_AGENT_ID } from './config.js'
 import { loadOrCreateDashboardToken, checkBearerToken } from './web/dashboard-auth.js'
 import { isBlockedCrossOriginWrite } from './web/csrf-origin.js'
 import { json } from './web/http-helpers.js'
@@ -339,7 +339,9 @@ export function startWebServer(port = 3420): http.Server {
   // agent already has its own hooks block.
   try {
     const patched: string[] = []
-    for (const agentName of listAgentNames()) {
+    // Include the main agent (MAIN_AGENT_ID) so the voice hook is also seeded
+    // into ~/.claude/settings.json alongside existing hooks (e.g. telegram_progress.py).
+    for (const agentName of [MAIN_AGENT_ID, ...listAgentNames()]) {
       if (ensureAgentHooks(agentName)) patched.push(agentName)
     }
     if (patched.length) logger.info({ patched }, 'PreCompact hook backfilled into agent settings.json')
