@@ -13,6 +13,8 @@ import {
   decideStuckInputRecovery,
   parkedChannelInput,
   parkedInputText,
+  parkedInputRowCount,
+  submitLanded,
 } from '../pane-state.js'
 
 // Realistic pane fixtures modelled on actual `tmux capture-pane -p`
@@ -1819,5 +1821,65 @@ describe('detectsPastePlaceholder', () => {
       '  paste again to expand',
     ].join('\n')
     expect(detectsPastePlaceholder(stubInBox)).toBe(true)
+  })
+})
+
+describe('parkedInputRowCount', () => {
+  it('returns 0 for an empty input box (bare prompt)', () => {
+    expect(parkedInputRowCount(IDLE_BYPASS)).toBe(0)
+    expect(parkedInputRowCount(BUSY_FULL_FOOTER)).toBe(0)
+  })
+
+  it('returns 0 when there is no input box at all', () => {
+    expect(parkedInputRowCount('just scrollback text\nno separators here')).toBe(0)
+  })
+
+  it('returns 1 for a single-row parked input', () => {
+    expect(parkedInputRowCount(TYPING_PARKED)).toBe(1)
+    expect(parkedInputRowCount(PENDING_PASTE)).toBe(1)
+  })
+
+  it('counts every visual row of a wrapped multi-row parked input', () => {
+    // A wrapped message occupying 3 box-interior rows; a bare Enter here would
+    // insert a newline instead of submitting.
+    const multiRow = [
+      '',
+      SEP,
+      '❯ first line of a long parked message that wraps across',
+      '  several visual rows inside the input box and would not',
+      '  submit on a bare Enter',
+      SEP,
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n')
+    expect(parkedInputRowCount(multiRow)).toBe(3)
+  })
+})
+
+describe('submitLanded', () => {
+  // The exact text parked before the submit attempt.
+  const parkedSig = stuckInputSignature(TYPING_PARKED) as string
+
+  it('captures a non-empty signature from the parked fixture', () => {
+    expect(parkedSig).toBeTruthy()
+  })
+
+  it('is false when the identical signature is still parked', () => {
+    expect(submitLanded(parkedSig, TYPING_PARKED)).toBe(false)
+  })
+
+  it('is true when the box cleared (pane went idle)', () => {
+    expect(submitLanded(parkedSig, IDLE_BYPASS)).toBe(true)
+  })
+
+  it('is true when the agent started processing (pane went busy)', () => {
+    expect(submitLanded(parkedSig, BUSY_FULL_FOOTER)).toBe(true)
+  })
+
+  it('is true when different text is now parked', () => {
+    expect(submitLanded(parkedSig, PENDING_PASTE)).toBe(true)
+  })
+
+  it('is false when there is no after-capture (null)', () => {
+    expect(submitLanded(parkedSig, null)).toBe(false)
   })
 })

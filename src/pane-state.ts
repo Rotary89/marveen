@@ -842,6 +842,41 @@ export function parkedInputText(pane: string): string | null {
   return flat.length > 0 ? flat : null
 }
 
+// How many VISUAL rows the live input box content occupies, ignoring the
+// bare prompt glyph and blank padding. The caller uses this to choose the
+// right submit keystroke: a MULTI-row parked input must NOT be submitted with
+// a bare Enter, because in the Claude TUI a plain Enter on a wrapped /
+// multi-line buffer inserts a newline instead of submitting (see
+// agent-process.ts:833) -- a single-row buffer submits on Enter.
+//
+// Counts the non-empty rows of liveInputBox() after stripping the leading `❯`
+// prompt marker; an empty box (`❯ ` only) or no box at all -> 0. Pure: no
+// tmux, only the captured text.
+export function parkedInputRowCount(pane: string): number {
+  const box = liveInputBox(pane)
+  if (box == null) return 0
+  return box
+    .split('\n')
+    .map((row) => row.replace(/^\s*❯/, '').trim())
+    .filter((row) => row.length > 0).length
+}
+
+// Post-submit verification: did the parked input actually leave the box?
+//
+// `prevSig` is stuckInputSignature(pane) captured BEFORE the submit attempt
+// (the exact text that was parked). `paneAfter` is a fresh capture taken
+// AFTER the submit. Returns true when the submit LANDED -- the same parked
+// signature is no longer 'typing' in the box: it cleared (pane went idle),
+// the agent started processing it (pane went busy), or different text is now
+// parked. Returns false when the IDENTICAL signature is still parked (the
+// Enter was swallowed -> the caller should retry / escalate), or when
+// paneAfter is null (no capture -> cannot confirm, treat as not-landed).
+// Pure: builds on stuckInputSignature() (which gates on detectPaneState).
+export function submitLanded(prevSig: string, paneAfter: string | null): boolean {
+  if (paneAfter == null) return false
+  return stuckInputSignature(paneAfter) !== prevSig
+}
+
 // Per-session bookkeeping for the stuck-input recovery watcher. A "spell"
 // is one continuous stretch of the SAME text parked in the input box.
 export interface StuckInputState {
@@ -947,6 +982,79 @@ export function decideStuckInputRecovery(
     recover: true,
     next: { parkedSig, firstSeenAt: prev.firstSeenAt, lastRecoverAt: now, attempts: prev.attempts + 1 },
   }
+}
+
+// =============================================================================
+// Submit-action decision (delivery-reliability, BA56A500)
+// =============================================================================
+//
+// Turns the parked-input facts -- built from parkedInputRowCount() and
+// parkedChannelInput() above -- into a recovery MOVE. The decision is the heart
+// of the fix: a plain recovery Enter on a MULTI-ROW parked message inserts a
+// newline rather than submitting (corrupt), so multi-row must never bare-Enter;
+// and the chat_id truncation-guard (no verbatim re-inject of an incomplete
+// <channel> block) is preserved. The caller verifies the move landed with
+// submitLanded() and escalates within the attempts budget if it did not.
+
+/** A concrete recovery move for the stuck-input watcher. */
+export type StuckInputAction =
+  | 'reinject-block'   // clear + verbatim re-inject the COMPLETE <channel> block (chat_id-safe)
+  | 'reinject-plain'   // clear + re-inject collapsed parked text (sub-agents only)
+  | 'clear-preamble'   // clear a truncated/stale safety preamble, never re-inject
+  | 'enter'            // a single bare Enter -- ONLY safe at rowCount <= 1
+  | 'hold'             // do nothing this tick (multi-row truncated / truncation-guard)
+
+export interface StuckInputActionFacts {
+  /** attempt > MAIN_STUCK_ENTER_ATTEMPTS -- past the Enter-first budget. */
+  escalate: boolean
+  /** parkedInputRowCount(pane) -- >1 forbids a bare Enter. */
+  rowCount: number
+  /** A complete <channel> block is parked: chat_id-safe verbatim re-inject. */
+  blockComplete: boolean
+  /** A <channel> block is parked but truncated: chat_id unrecoverable, MUST
+   * NOT re-inject (wrong chat_id) and MUST NOT corrupt via a multi-row Enter. */
+  blockTruncated: boolean
+  /** shouldClearTruncatedPreamble(pane): a stale safety preamble to clear. */
+  truncatedPreamble: boolean
+  /** Sub-agent session: re-injecting collapsed parked text is safe (no human draft). */
+  allowPlainReinject: boolean
+  /** parkedInputText(pane) != null -- there is collapsed text to re-inject. */
+  hasPlainText: boolean
+}
+
+/**
+ * Pure decision: given the parked-input facts, what recovery move to make.
+ * Dependency-free so it is unit-testable without tmux.
+ *
+ * Invariants (the fix):
+ *   - NEVER bare-Enter a multi-row box (rowCount > 1) -- it inserts a newline
+ *     and corrupts the message. Multi-row escalates straight to a re-inject
+ *     (when one is safe) or holds.
+ *   - A complete <channel> block is the safest move (chat_id-safe re-inject);
+ *     prefer it as soon as we escalate, and immediately when multi-row.
+ *   - A TRUNCATED <channel> block (chat_id unrecoverable) must not be
+ *     re-injected; multi-row truncated holds (awaiting the keystroke fix),
+ *     single-row keeps the harmless legacy Enter.
+ *   - Otherwise a bare Enter is the swallowed-Enter remedy, but only single-row.
+ */
+export function decideStuckInputAction(f: StuckInputActionFacts): StuckInputAction {
+  const multiRow = f.rowCount > 1
+  // Complete channel block: chat_id-safe verbatim re-inject. Multi-row is itself
+  // a reason to escalate now (a plain Enter would corrupt it).
+  if (f.blockComplete) {
+    return f.escalate || multiRow ? 'reinject-block' : 'enter'
+  }
+  // Sub-agent non-channel parked text: clear + re-inject is safe (no human draft).
+  if (f.allowPlainReinject && f.hasPlainText && !f.blockTruncated) {
+    return f.escalate || multiRow ? 'reinject-plain' : 'enter'
+  }
+  // Truncated safety preamble: clear only (never re-inject a stale preamble).
+  if (f.truncatedPreamble && f.escalate) return 'clear-preamble'
+  // Truncated <channel> block: hold a multi-row (Enter would corrupt; re-inject
+  // would answer the wrong chat_id), keep the harmless legacy Enter single-row.
+  if (f.blockTruncated) return multiRow ? 'hold' : 'enter'
+  // Default swallowed-Enter remedy -- never on multi-row.
+  return multiRow ? 'hold' : 'enter'
 }
 
 // =============================================================================
