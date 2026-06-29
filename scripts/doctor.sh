@@ -15,7 +15,7 @@ FAIL=0
 MAIN_AGENT_ID="$(grep -E '^MAIN_AGENT_ID=' .env 2>/dev/null | head -1 | cut -d= -f2-)"
 MAIN_AGENT_ID="${MAIN_AGENT_ID:-marveen}"
 
-echo -e "\n${BOLD}Marveen Doctor${RESET} — $(date '+%Y-%m-%d %H:%M:%S')\n"
+echo -e "\n${BOLD}Marveen Doctor${RESET}: $(date '+%Y-%m-%d %H:%M:%S')\n"
 
 # --- Systemd services ---
 echo -e "${BOLD}Services${RESET}"
