@@ -9147,12 +9147,12 @@ async function initSidebarBrand() {
       if (typeof renderStaticI18n === 'function') renderStaticI18n()
       if (brand) {
         document.title = brand
+        const appleTitle = document.querySelector('meta[name="apple-mobile-web-app-title"]')
+        if (appleTitle) appleTitle.setAttribute('content', brand)
         const topbar = document.getElementById('mobileTopbarTitle')
         if (topbar) topbar.textContent = brand
         const name = document.getElementById('sidebarBrandName')
         if (name) name.textContent = brand
-        const appleTitle = document.querySelector('meta[name="apple-mobile-web-app-title"]')
-        if (appleTitle) appleTitle.setAttribute('content', brand)
         const subtitle = document.getElementById('updatesSubtitle')
         if (subtitle) subtitle.textContent = `${brand} ` + t('overview.updates_subtitle')
       }
@@ -9160,6 +9160,15 @@ async function initSidebarBrand() {
   } catch {}
 }
 initSidebarBrand()
+
+// In an installed (standalone) PWA, lock the zoom: iOS otherwise auto-zooms when
+// a small-text input is focused and allows stray pinch-zoom, neither of which
+// suits an app-like control panel. Left untouched in a normal browser tab so
+// page zoom / accessibility still work there.
+if (window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone) {
+  const vp = document.querySelector('meta[name="viewport"]')
+  if (vp) vp.setAttribute('content', 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover')
+}
 
 // === Updates page ===
 function escapeHtmlUpdates(s) {
