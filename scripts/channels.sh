@@ -204,6 +204,20 @@ fi
 # down, so there is never a second concurrent poller in steady state. Nothing to
 # set here: the coordinator gates itself on native liveness.
 
+# PLUGIN PRE-WARM (2026-06-05 incident): the plugin's MCP `start` script runs
+# `bun install --no-summary && bun server.ts`. On the FIRST load after a plugin
+# update, `bun install` resolves dependencies and prints progress -- some of it
+# leaks to STDOUT, which corrupts the MCP stdio JSON-RPC handshake. Claude marks
+# the server Failed and kills it, leaving NO bun-poller child (Telegram dead,
+# reply tool absent). The post-init unlock below misses it because the /mcp row
+# is not literally "✗ Failed". Fix: warm node_modules synchronously here so the
+# server's own `bun install` is a fast no-op with clean stdout when claude loads
+# the plugin.
+PLUGIN_DIR="$(ls -d "$HOME/.claude/plugins/cache/claude-plugins-official/${CHANNEL_PROVIDER}"/*/ 2>/dev/null | sort -V | tail -1)"
+if [ -n "$PLUGIN_DIR" ] && [ -f "${PLUGIN_DIR}package.json" ] && command -v bun >/dev/null 2>&1; then
+  ( cd "$PLUGIN_DIR" && timeout 120 bun install --no-summary --silent >/dev/null 2>&1 ) || true
+fi
+
 # Tmux session indítás
 #
 # Always start a fresh conversation. --continue is intentionally omitted:
@@ -228,13 +242,14 @@ $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
 #    valasz: 2 Enter = "Yes, I accept")
 #  - "Do you trust the files in this folder?" / "trust" prompts (Y Enter)
 #  - "Welcome to Claude Code" / kezdo vezetes (Enter a folytatashoz)
-# 12 sec timeout ket retry-jal, mert WSL/tmux paint slow lehet first-run-on.
+# 30 sec timeout: after a slow boot the dialog can appear late, 12s is not enough.
 #
 # EPERM fallback (Claude Code 2.1.183+ regression): launching --channels in a
 # trusted project directory throws EPERM before any dialog appears. Detected
 # below; one auto-restart from /tmp where the trust dialog fires instead.
 _eperm_restarted=0
-for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+_guard_reached=0
+for i in $(seq 1 30); do
   sleep 1
   pane=$($TMUX capture-pane -t "$SESSION" -p 2>/dev/null || true)
   case "$pane" in
@@ -281,11 +296,27 @@ for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
       continue
       ;;
     *"Listening for channel messages"*)
+      _guard_reached=1
       break
       ;;
   esac
 done
 unset _eperm_restarted
+
+# Fallback: if we never reached the "Listening..." state after 30s, make a blind
+# "2"+Enter attempt -- the Bypass dialog text likely changed and we missed it.
+if [ "$_guard_reached" -eq 0 ]; then
+  echo "$(date '+%Y-%m-%d %H:%M:%S') channels.sh startup guard: 30s timeout, blind accept attempt" >> "$INSTALL_DIR/store/channels-failures.log"
+  $TMUX send-keys -t "$SESSION" "2" Enter
+  sleep 2
+  # If that did not help either (e.g. a different dialog), try a bare Enter too
+  pane=$($TMUX capture-pane -t "$SESSION" -p 2>/dev/null || true)
+  case "$pane" in
+    *"Listening for channel messages"*) ;;
+    *) $TMUX send-keys -t "$SESSION" Enter ;;
+  esac
+fi
+unset _guard_reached
 
 # Set agent name once the session is ready. (/remote-control dropped: the operator no
 # longer uses Remote Control.)
