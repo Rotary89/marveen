@@ -1,0 +1,13 @@
+# NOTE: replace /path/to/marveen (install dir), /home/USER (home), and USER=youruser with your values.
+[Unit]
+Description=Marveen prompt watchdog (auto-handle safe Claude Code interactive prompts)
+After=marveen-channels.service
+
+[Service]
+Type=oneshot
+ExecStart=/path/to/marveen/scripts/prompt-watchdog.sh
+Environment=PATH=/home/USER/.local/bin:/home/USER/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/home/USER
+Environment=TZ=Europe/Budapest
+StandardOutput=append:/path/to/marveen/store/prompt-watchdog.log
+StandardError=append:/path/to/marveen/store/prompt-watchdog.log
