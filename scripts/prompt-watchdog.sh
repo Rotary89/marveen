@@ -1,10 +1,20 @@
 #!/bin/bash
-# Monitors the main agent's <id>-channels tmux pane for interactive prompts.
-# Safe prompts (rate limit, compact) are auto-handled.
+# Monitors the main agent's <id>-channels tmux pane for interactive prompts and
+# usage rate limits. Safe prompts (compact) are auto-handled. Rate limits are
+# handled with a poll-and-verify retry loop (no fragile reset-time parsing).
 # Unknown interactive prompts trigger a Telegram alert.
 #
+# Rate limit handling (poll-and-verify, version-proof):
+#   - Detect the limit (interactive "Stop and wait" prompt OR inline
+#     "You've hit your session limit" banner).
+#   - Enter wait mode (marker file). Dismiss the interactive prompt with "1".
+#   - Every ~10 min, if the session is idle, inject an English continue prompt
+#     so the agent resumes the interrupted task from context (--continue keeps it).
+#   - Verify: if a limit marker still shows, reschedule; if the agent is already
+#     working again, just clear wait mode. Never parses the reset time, so a
+#     wording change in a Claude Code update cannot break it.
+#
 # Safe auto-responses:
-#   - Rate limit "Stop and wait"  -> "1" Enter
 #   - Compact "Auto-compact"      -> "1" Enter
 #
 # Alert (never auto-accept):
@@ -15,7 +25,15 @@ set -u
 INSTALL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 STORE="$INSTALL_DIR/store"
 STATE_FILE="$STORE/.prompt-watchdog-state"
+RL_MARKER="$STORE/.ratelimit-waiting"   # presence = waiting on a limit; content = next-retry epoch
 LOG_TAG="prompt-watchdog"
+
+# Approved English continue prompt. The session context survives (same --continue
+# session), so one sentence is enough -- no need to restore the parked prompt.
+CONTINUE_PROMPT="You were paused by a usage rate limit, which has now reset. Review your last task above and continue from where you left off. Do not restart from scratch."
+
+RETRY_INTERVAL=600   # 10 min between retries
+FIRST_DELAY=120      # first retry 2 min after detection (covers short resets cheaply)
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [$LOG_TAG] $*"; }
 
@@ -43,65 +61,96 @@ if ! tmux has-session -t "$SESSION" 2>/dev/null; then
   exit 0
 fi
 
-# Capture last 40 lines of pane
 PANE_CONTENT=$(tmux capture-pane -t "$SESSION" -p -S -40 2>/dev/null)
+TAIL=$(echo "$PANE_CONTENT" | tail -n 10)
+NOW=$(date +%s)
 
-# Only act if "Enter to confirm" is present (means a dialog is waiting)
+# Is the pane actively processing? (Claude shows "esc to interrupt" while working.)
+is_busy() { echo "$TAIL" | grep -qi "esc to interrupt"; }
+
+# The real interactive limit menu renders all three of these lines together.
+# Requiring all three avoids false-firing on prose that merely mentions the
+# phrase (this watchdog runs against the very session that may be discussing it).
+has_interactive() {
+  echo "$PANE_CONTENT" | grep -qF "Stop and wait for limit to reset" \
+    && echo "$PANE_CONTENT" | grep -qF "Upgrade your plan" \
+    && echo "$PANE_CONTENT" | grep -qF "Enter to confirm"
+}
+
+# Are we currently rate limited? Two real UI shapes, both deliberately strict:
+#   - interactive menu  -> has_interactive (the three-line prompt)
+#   - inline red banner -> the "hit your session limit" line AND the rendered
+#     "/upgrade to increase your usage limit" command hint, in the tail only.
+# Detection is best-effort; the retry cadence is the robustness layer, so being
+# strict here (no self-trigger) is the right trade-off.
+is_limited() {
+  has_interactive && return 0
+  echo "$TAIL" | grep -qi "hit your session limit" \
+    && echo "$TAIL" | grep -qF "/upgrade to increase your usage limit"
+}
+
+# ---------------------------------------------------------------------------
+# 1. Already waiting on a rate limit -> drive the retry loop.
+# ---------------------------------------------------------------------------
+if [ -f "$RL_MARKER" ]; then
+  NEXT=$(cat "$RL_MARKER" 2>/dev/null || echo 0)
+  case "$NEXT" in (*[!0-9]*|"") NEXT=0 ;; esac
+  [ "$NOW" -lt "$NEXT" ] && exit 0   # not time yet
+
+  if is_busy; then
+    log "session active again -- clearing wait mode (resumed on its own)"
+    rm -f "$RL_MARKER"
+    exit 0
+  fi
+
+  if is_limited; then
+    # Still limited. Dismiss the interactive prompt if it is up, then wait more.
+    has_interactive && tmux send-keys -t "$SESSION" "1" Enter
+    echo $((NOW + RETRY_INTERVAL)) > "$RL_MARKER"
+    log "still rate-limited -- next retry in $((RETRY_INTERVAL/60)) min"
+    exit 0
+  fi
+
+  # Idle, no limit marker -> try to resume the interrupted task.
+  log "retry -- injecting continue prompt"
+  tmux send-keys -t "$SESSION" "$CONTINUE_PROMPT" Enter
+  sleep 9
+  PANE_CONTENT=$(tmux capture-pane -t "$SESSION" -p -S -40 2>/dev/null)
+  TAIL=$(echo "$PANE_CONTENT" | tail -n 10)
+  if is_limited; then
+    has_interactive && tmux send-keys -t "$SESSION" "1" Enter
+    echo $((NOW + RETRY_INTERVAL)) > "$RL_MARKER"
+    log "continue rejected, still limited -- next retry in $((RETRY_INTERVAL/60)) min"
+  else
+    rm -f "$RL_MARKER"
+    log "rate limit cleared -- task resumed automatically"
+    send_telegram "Rate limit cleared. I resumed the task automatically."
+  fi
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# 2. Fresh rate-limit detection -> enter wait mode.
+# ---------------------------------------------------------------------------
+if is_limited; then
+  log "rate limit detected -- entering wait/retry mode"
+  has_interactive && tmux send-keys -t "$SESSION" "1" Enter
+  echo $((NOW + FIRST_DELAY)) > "$RL_MARKER"
+  send_telegram "Rate limit detected. I'll auto-retry the task every ~$((RETRY_INTERVAL/60)) min until it clears. No action needed."
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Other interactive prompts (only when an "Enter to confirm" dialog waits).
+# ---------------------------------------------------------------------------
 if ! echo "$PANE_CONTENT" | grep -qF "Enter to confirm"; then
   exit 0
 fi
 
-# Compute hash to avoid re-handling the same prompt
+# Avoid re-handling the same prompt
 CONTENT_HASH=$(echo "$PANE_CONTENT" | md5sum | cut -d' ' -f1)
 LAST_HASH=$(cat "$STATE_FILE" 2>/dev/null || echo "")
 if [ "$CONTENT_HASH" = "$LAST_HASH" ]; then
-  exit 0
-fi
-
-# Classify the prompt
-if echo "$PANE_CONTENT" | grep -qF "Stop and wait for limit to reset"; then
-  log "Rate limit prompt detected -- auto-selecting option 1 (wait)"
-  # Record when the block started (used to find missed messages after unblock)
-  BLOCK_TS=$(date -u +%Y-%m-%dT%H:%M:%S)
-  echo "$CONTENT_HASH" > "$STATE_FILE"
-  tmux send-keys -t "$SESSION" "1" Enter
-  # After unblock: inject missed messages from MCP log into the session.
-  # Wait for Claude to resume, then check for channel notifications that
-  # arrived during the blocked period.
-  (
-    sleep 10
-    # Claude Code encodes the project dir into the cache path by replacing every
-    # "/" with "-" (e.g. /home/u/marveen -> -home-u-marveen). Derive it from
-    # INSTALL_DIR so this works on any machine, no hardcoded user path.
-    PROJECT_SLUG="${INSTALL_DIR//\//-}"
-    MCP_DIR="$HOME/.cache/claude-cli-nodejs/${PROJECT_SLUG}/mcp-logs-plugin-telegram-telegram"
-    CURRENT_LOG=$(ls -1t "$MCP_DIR"/*.jsonl 2>/dev/null | head -1)
-    if [ -n "$CURRENT_LOG" ]; then
-      MISSED=$(grep 'notifications/claude/channel:' "$CURRENT_LOG" 2>/dev/null \
-        | python3 -c "
-import sys, json
-from datetime import datetime, timezone
-block_ts = datetime.fromisoformat('${BLOCK_TS}').replace(tzinfo=timezone.utc)
-msgs = []
-for line in sys.stdin:
-    try:
-        d = json.loads(line)
-        text = d.get('debug','')
-        ts_str = d.get('timestamp','')
-        if 'notifications/claude/channel:' not in text: continue
-        ts = datetime.fromisoformat(ts_str.replace('Z','+00:00'))
-        if ts >= block_ts:
-            msg = text.split('notifications/claude/channel: ', 1)[-1][:200]
-            msgs.append(msg)
-    except: pass
-print('\n'.join(msgs))
-" 2>/dev/null)
-      if [ -n "$MISSED" ]; then
-        tmux send-keys -t "$SESSION" "[Messages that arrived during the rate limit, process them:
-${MISSED}]" Enter
-      fi
-    fi
-  ) &
   exit 0
 fi
 
