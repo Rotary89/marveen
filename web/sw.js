@@ -2,7 +2,7 @@
 // Strategy: network-first for app-shell assets (always fresh when online),
 // cache fallback for offline use. /api/* always bypassed (Bearer-auth safety).
 
-const CACHE_NAME = 'marveen-shell-v1';
+const CACHE_NAME = 'marveen-shell-v2';
 
 self.addEventListener('install', (event) => {
   self.skipWaiting();
@@ -29,12 +29,21 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     fetch(event.request)
       .then((response) => {
-        if (url.origin === self.location.origin) {
+        // Only cache successful same-origin responses. Caching an error/opaque
+        // response then serving it later would poison the shell.
+        if (url.origin === self.location.origin && response.ok) {
           const clone = response.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
         }
         return response;
       })
-      .catch(() => caches.match(event.request))
+      .catch(async () => {
+        // Network failed (offline, cold proxy, transient). Fall back to cache,
+        // but a cache MISS must NOT resolve to null -- respondWith(null) throws
+        // "Returned response is null" and breaks the page. Return a proper
+        // network-error Response so the browser handles it as a normal failure.
+        const cached = await caches.match(event.request);
+        return cached || Response.error();
+      })
   );
 });
